@@ -50,7 +50,7 @@ public class MainActivity extends AppCompatActivity {
     private static final String KEY_USER = "username";
     private static final String KEY_PASS = "password";
     private static final String KEY_ZOOM = "zoom_level";
-    private static final String DEFAULT_URL = "http://192.168.1.176:4096";
+    private static final String DEFAULT_URL = "http://localhost:4096";
     private static final int DEFAULT_ZOOM = 100;
     private static final int PERM_REQUEST = 1;
 
@@ -316,7 +316,7 @@ public class MainActivity extends AppCompatActivity {
         layout.setPadding(48, 24, 48, 24);
 
         EditText urlInput = new EditText(this);
-        urlInput.setHint("Server URL (e.g. http://192.168.1.176:4096)");
+        urlInput.setHint("Server URL (e.g. http://localhost:4096)");
         urlInput.setText(currentUrl);
         urlInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         layout.addView(urlInput);
