@@ -1,0 +1,30 @@
+# Build outputs
+android/app/build/
+android/build/
+android/capacitor-cordova-android-plugins/build/
+android/.gradle/
+android/gradle/
+android/gradlew
+android/gradlew.bat
+android/local.properties
+
+# Node
+node_modules/
+package-lock.json
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Capacitor generated
+www/
+android/app/src/main/assets/public/
+
+# Signing
+*.jks
+*.keystore
