@@ -169,6 +169,44 @@ public class MainActivity extends AppCompatActivity {
                     "    document.querySelector('meta[name=viewport]').content='width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no';" +
                     "  }" +
                     "  document.body.style.overscrollBehavior='none';" +
+                    "  if (!window.__ocEnterIntercept) {" +
+                    "    window.__ocEnterIntercept = true;" +
+                    "    document.addEventListener('keydown', function(e){" +
+                    "      if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.isComposing) {" +
+                    "        var el = document.activeElement;" +
+                    "        if (!el) return;" +
+                    "        var tag = el.tagName;" +
+                    "        var isInput = tag === 'TEXTAREA' || tag === 'INPUT' || el.isContentEditable;" +
+                    "        if (!isInput) return;" +
+                    "        e.preventDefault();" +
+                    "        e.stopImmediatePropagation();" +
+                    "        if (tag === 'TEXTAREA' || tag === 'INPUT') {" +
+                    "          var start = el.selectionStart || 0;" +
+                    "          var end = el.selectionEnd || 0;" +
+                    "          var before = el.value.substring(0, start);" +
+                    "          var after = el.value.substring(end);" +
+                    "          el.value = before + '\\n' + after;" +
+                    "          var newPos = start + 1;" +
+                    "          el.dispatchEvent(new Event('input', { bubbles: true }));" +
+                    "          requestAnimationFrame(function(){" +
+                    "            el.selectionStart = el.selectionEnd = newPos;" +
+                    "          });" +
+                    "        } else if (el.isContentEditable) {" +
+                    "          var sel = window.getSelection();" +
+                    "          if (!sel || !sel.rangeCount) return;" +
+                    "          var range = sel.getRangeAt(0);" +
+                    "          range.deleteContents();" +
+                    "          var br = document.createTextNode('\\n');" +
+                    "          range.insertNode(br);" +
+                    "          range.setStartAfter(br);" +
+                    "          range.setEndAfter(br);" +
+                    "          sel.removeAllRanges();" +
+                    "          sel.addRange(range);" +
+                    "          el.dispatchEvent(new Event('input', { bubbles: true }));" +
+                    "        }" +
+                    "      }" +
+                    "    }, true);" +
+                    "  }" +
                     "})();", null);
             }
 
