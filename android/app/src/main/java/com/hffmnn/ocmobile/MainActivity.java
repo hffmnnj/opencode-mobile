@@ -68,6 +68,9 @@ public class MainActivity extends AppCompatActivity {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private boolean wasPaused = false;
+    private long pauseTimestamp = 0;
+    private final int[] domHashAtPause = new int[1];
+    private int resumeGeneration = 0;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -396,11 +399,12 @@ public class MainActivity extends AppCompatActivity {
     protected void onPause() {
         super.onPause();
         wasPaused = true;
+        pauseTimestamp = System.currentTimeMillis();
+        resumeGeneration++; // invalidate any pending health check from a previous resume
         if (webView != null) {
-            webView.onPause();
             webView.pauseTimers();
         }
-        Log.d(TAG, "onPause — webview frozen");
+        Log.d(TAG, "onPause — timers paused, gen=" + resumeGeneration);
     }
 
     @Override
@@ -412,39 +416,76 @@ public class MainActivity extends AppCompatActivity {
         }
         if (wasPaused) {
             wasPaused = false;
-            Log.d(TAG, "onResume — surgical reconnect after background");
-            if (webView.getVisibility() == View.VISIBLE && webView.getUrl() != null) {
-                // Fire standard browser reconnect events so OpenCode's JS
-                // WebSocket client wakes itself up if it listens for them.
-                webView.evaluateJavascript(
-                    "(function(){" +
-                    "  Object.defineProperty(document,'visibilityState',{value:'visible',writable:true});" +
-                    "  Object.defineProperty(document,'hidden',{value:false,writable:true});" +
-                    "  document.dispatchEvent(new Event('visibilitychange'));" +
-                    "  window.dispatchEvent(new Event('online'));" +
-                    "  window.dispatchEvent(new Event('focus'));" +
-                    "  document.dispatchEvent(new Event('focus'));" +
-                    "  try { Object.defineProperty(navigator,'onLine',{value:true,writable:true}); } catch(e){}" +
-                    "  return 'events-fired';" +
-                    "})();",
-                    value -> Log.d(TAG, "reconnect injection result: " + value)
-                );
+            final int thisGen = ++resumeGeneration;
+            long backgroundMs = System.currentTimeMillis() - pauseTimestamp;
+            Log.d(TAG, "onResume — backgrounded for " + backgroundMs + "ms, gen=" + thisGen);
 
-                // 3-second health check: if the renderer is still dead, fall back to reload.
-                mainHandler.postDelayed(() -> {
-                    if (webView == null || webView.getUrl() == null) return;
-                    webView.evaluateJavascript(
-                        "document.visibilityState",
-                        state -> {
-                            Log.d(TAG, "visibilityState check: " + state);
-                            // evaluateJavascript quotes strings, so result is '"visible"'
-                            if (!"\"visible\"".equals(state)) {
-                                Log.w(TAG, "webview renderer still frozen, forcing reload");
-                                webView.reload();
-                            }
+            if (backgroundMs < 2000) {
+                Log.d(TAG, "short background (<2s), skipping reconnect logic");
+                return;
+            }
+
+            if (webView.getVisibility() == View.VISIBLE && webView.getUrl() != null) {
+                webView.evaluateJavascript(
+                    "document.body.innerHTML.length",
+                    value -> {
+                        // Ignore if a newer onPause/onResume cycle started
+                        if (thisGen != resumeGeneration) {
+                            Log.d(TAG, "stale DOM capture, gen=" + thisGen + " current=" + resumeGeneration);
+                            return;
                         }
-                    );
-                }, 3000);
+                        try {
+                            domHashAtPause[0] = Integer.parseInt(value);
+                            Log.d(TAG, "DOM hash captured: " + domHashAtPause[0]);
+                        } catch (Exception e) {
+                            domHashAtPause[0] = 0;
+                        }
+
+                        webView.evaluateJavascript(
+                            "(function(){" +
+                            "  Object.defineProperty(document,'visibilityState',{value:'visible',writable:true});" +
+                            "  Object.defineProperty(document,'hidden',{value:false,writable:true});" +
+                            "  document.dispatchEvent(new Event('visibilitychange'));" +
+                            "  window.dispatchEvent(new Event('online'));" +
+                            "  window.dispatchEvent(new Event('focus'));" +
+                            "  document.dispatchEvent(new Event('focus'));" +
+                            "  try { Object.defineProperty(navigator,'onLine',{value:true,writable:true}); } catch(e){}" +
+                            "  return 'events-fired';" +
+                            "})();",
+                            evValue -> Log.d(TAG, "reconnect injection result: " + evValue)
+                        );
+
+                        mainHandler.postDelayed(() -> {
+                            if (thisGen != resumeGeneration) {
+                                Log.d(TAG, "stale health check cancelled, gen=" + thisGen + " current=" + resumeGeneration);
+                                return;
+                            }
+                            if (webView == null || webView.getUrl() == null) return;
+                            webView.evaluateJavascript(
+                                "document.body.innerHTML.length",
+                                newValue -> {
+                                    if (thisGen != resumeGeneration) {
+                                        Log.d(TAG, "stale diff result ignored, gen=" + thisGen + " current=" + resumeGeneration);
+                                        return;
+                                    }
+                                    try {
+                                        int currentHash = Integer.parseInt(newValue);
+                                        Log.d(TAG, "DOM diff check: was=" + domHashAtPause[0] + " now=" + currentHash);
+                                        if (currentHash == domHashAtPause[0]) {
+                                            Log.w(TAG, "DOM static for 3s, streaming dead — reloading");
+                                            webView.reload();
+                                        } else {
+                                            Log.d(TAG, "DOM changed, streaming resumed — no reload needed");
+                                        }
+                                    } catch (Exception e) {
+                                        Log.w(TAG, "DOM diff parse failed, reloading to be safe");
+                                        webView.reload();
+                                    }
+                                }
+                            );
+                        }, 3000);
+                    }
+                );
             }
         }
     }
