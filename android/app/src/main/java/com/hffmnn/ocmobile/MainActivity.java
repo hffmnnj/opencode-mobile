@@ -67,6 +67,7 @@ public class MainActivity extends AppCompatActivity {
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private boolean wasPaused = false;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -375,6 +376,10 @@ public class MainActivity extends AppCompatActivity {
                 }
             })
             .setNegativeButton("Cancel", null)
+            .setNeutralButton("Refresh", (dialog, which) -> {
+                Log.d(TAG, "manual refresh triggered from settings");
+                connect();
+            })
             .show();
     }
 
@@ -384,6 +389,63 @@ public class MainActivity extends AppCompatActivity {
             webView.goBack();
         } else {
             super.onBackPressed();
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        wasPaused = true;
+        if (webView != null) {
+            webView.onPause();
+            webView.pauseTimers();
+        }
+        Log.d(TAG, "onPause — webview frozen");
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (webView != null) {
+            webView.onResume();
+            webView.resumeTimers();
+        }
+        if (wasPaused) {
+            wasPaused = false;
+            Log.d(TAG, "onResume — surgical reconnect after background");
+            if (webView.getVisibility() == View.VISIBLE && webView.getUrl() != null) {
+                // Fire standard browser reconnect events so OpenCode's JS
+                // WebSocket client wakes itself up if it listens for them.
+                webView.evaluateJavascript(
+                    "(function(){" +
+                    "  Object.defineProperty(document,'visibilityState',{value:'visible',writable:true});" +
+                    "  Object.defineProperty(document,'hidden',{value:false,writable:true});" +
+                    "  document.dispatchEvent(new Event('visibilitychange'));" +
+                    "  window.dispatchEvent(new Event('online'));" +
+                    "  window.dispatchEvent(new Event('focus'));" +
+                    "  document.dispatchEvent(new Event('focus'));" +
+                    "  try { Object.defineProperty(navigator,'onLine',{value:true,writable:true}); } catch(e){}" +
+                    "  return 'events-fired';" +
+                    "})();",
+                    value -> Log.d(TAG, "reconnect injection result: " + value)
+                );
+
+                // 3-second health check: if the renderer is still dead, fall back to reload.
+                mainHandler.postDelayed(() -> {
+                    if (webView == null || webView.getUrl() == null) return;
+                    webView.evaluateJavascript(
+                        "document.visibilityState",
+                        state -> {
+                            Log.d(TAG, "visibilityState check: " + state);
+                            // evaluateJavascript quotes strings, so result is '"visible"'
+                            if (!"\"visible\"".equals(state)) {
+                                Log.w(TAG, "webview renderer still frozen, forcing reload");
+                                webView.reload();
+                            }
+                        }
+                    );
+                }, 3000);
+            }
         }
     }
 
