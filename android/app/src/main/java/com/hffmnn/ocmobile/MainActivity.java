@@ -182,7 +182,27 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public boolean shouldOverrideUrlLoading(@NonNull WebView view, @NonNull WebResourceRequest request) {
-                return false;
+                Uri uri = request.getUrl();
+                String urlStr = uri.toString();
+
+                // Always let the server URL and its subpaths load in the WebView
+                SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+                String serverUrl = prefs.getString(KEY_URL, DEFAULT_URL);
+                String serverHost = Uri.parse(serverUrl).getHost();
+                String reqHost = uri.getHost();
+
+                if (serverHost != null && reqHost != null && serverHost.equalsIgnoreCase(reqHost)) {
+                    return false; // load internally
+                }
+
+                // Open everything else externally
+                try {
+                    Intent intent = new Intent(Intent.ACTION_VIEW, uri);
+                    startActivity(intent);
+                } catch (Exception e) {
+                    Log.w(TAG, "no handler for URL: " + urlStr);
+                }
+                return true;
             }
         });
 
