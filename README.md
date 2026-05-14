@@ -14,6 +14,12 @@ This is a thin native Android shell around the OpenCode web interface. It connec
 - Back button navigation. Hardware back maps to WebView history.
 - Clean full-screen chrome. No address bar or tabs.
 
+## Screenshots
+
+![Server Settings — OpenCode Mobile running a GoopSpec review session on a Pixel foldable](screenshots/server-settings-modal.jpg)
+
+The app renders the full OpenCode web UI (code reviews, chat, file tree) in a native WebView with configurable zoom and server settings.
+
 ## Prerequisites
 
 - Android 8+ device
