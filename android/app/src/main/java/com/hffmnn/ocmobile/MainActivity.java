@@ -67,6 +67,10 @@ public class MainActivity extends AppCompatActivity {
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private boolean wasPaused = false;
+    private long pauseTimestamp = 0;
+    private final int[] domHashAtPause = new int[1];
+    private int resumeGeneration = 0;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -375,6 +379,10 @@ public class MainActivity extends AppCompatActivity {
                 }
             })
             .setNegativeButton("Cancel", null)
+            .setNeutralButton("Refresh", (dialog, which) -> {
+                Log.d(TAG, "manual refresh triggered from settings");
+                connect();
+            })
             .show();
     }
 
@@ -384,6 +392,101 @@ public class MainActivity extends AppCompatActivity {
             webView.goBack();
         } else {
             super.onBackPressed();
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        wasPaused = true;
+        pauseTimestamp = System.currentTimeMillis();
+        resumeGeneration++; // invalidate any pending health check from a previous resume
+        if (webView != null) {
+            webView.pauseTimers();
+        }
+        Log.d(TAG, "onPause — timers paused, gen=" + resumeGeneration);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (webView != null) {
+            webView.onResume();
+            webView.resumeTimers();
+        }
+        if (wasPaused) {
+            wasPaused = false;
+            final int thisGen = ++resumeGeneration;
+            long backgroundMs = System.currentTimeMillis() - pauseTimestamp;
+            Log.d(TAG, "onResume — backgrounded for " + backgroundMs + "ms, gen=" + thisGen);
+
+            if (backgroundMs < 2000) {
+                Log.d(TAG, "short background (<2s), skipping reconnect logic");
+                return;
+            }
+
+            if (webView.getVisibility() == View.VISIBLE && webView.getUrl() != null) {
+                webView.evaluateJavascript(
+                    "document.body.innerHTML.length",
+                    value -> {
+                        // Ignore if a newer onPause/onResume cycle started
+                        if (thisGen != resumeGeneration) {
+                            Log.d(TAG, "stale DOM capture, gen=" + thisGen + " current=" + resumeGeneration);
+                            return;
+                        }
+                        try {
+                            domHashAtPause[0] = Integer.parseInt(value);
+                            Log.d(TAG, "DOM hash captured: " + domHashAtPause[0]);
+                        } catch (Exception e) {
+                            domHashAtPause[0] = 0;
+                        }
+
+                        webView.evaluateJavascript(
+                            "(function(){" +
+                            "  Object.defineProperty(document,'visibilityState',{value:'visible',writable:true});" +
+                            "  Object.defineProperty(document,'hidden',{value:false,writable:true});" +
+                            "  document.dispatchEvent(new Event('visibilitychange'));" +
+                            "  window.dispatchEvent(new Event('online'));" +
+                            "  window.dispatchEvent(new Event('focus'));" +
+                            "  document.dispatchEvent(new Event('focus'));" +
+                            "  try { Object.defineProperty(navigator,'onLine',{value:true,writable:true}); } catch(e){}" +
+                            "  return 'events-fired';" +
+                            "})();",
+                            evValue -> Log.d(TAG, "reconnect injection result: " + evValue)
+                        );
+
+                        mainHandler.postDelayed(() -> {
+                            if (thisGen != resumeGeneration) {
+                                Log.d(TAG, "stale health check cancelled, gen=" + thisGen + " current=" + resumeGeneration);
+                                return;
+                            }
+                            if (webView == null || webView.getUrl() == null) return;
+                            webView.evaluateJavascript(
+                                "document.body.innerHTML.length",
+                                newValue -> {
+                                    if (thisGen != resumeGeneration) {
+                                        Log.d(TAG, "stale diff result ignored, gen=" + thisGen + " current=" + resumeGeneration);
+                                        return;
+                                    }
+                                    try {
+                                        int currentHash = Integer.parseInt(newValue);
+                                        Log.d(TAG, "DOM diff check: was=" + domHashAtPause[0] + " now=" + currentHash);
+                                        if (currentHash == domHashAtPause[0]) {
+                                            Log.w(TAG, "DOM static for 3s, streaming dead — reloading");
+                                            webView.reload();
+                                        } else {
+                                            Log.d(TAG, "DOM changed, streaming resumed — no reload needed");
+                                        }
+                                    } catch (Exception e) {
+                                        Log.w(TAG, "DOM diff parse failed, reloading to be safe");
+                                        webView.reload();
+                                    }
+                                }
+                            );
+                        }, 3000);
+                    }
+                );
+            }
         }
     }
 
