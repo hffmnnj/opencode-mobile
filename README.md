@@ -132,3 +132,12 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 ## License
 
 Same as OpenCode. Check the upstream repository for license details.
+
+## Permissions
+
+The app requests the following permissions on first launch:
+
+- **READ_MEDIA_IMAGES** and **READ_MEDIA_VIDEO** (Android 13+) / **READ_EXTERNAL_STORAGE** (Android 12 and below): Required for uploading photos and videos through the OpenCode file picker.
+- **CAMERA**: Required if you want to take photos directly from the app.
+
+These are standard storage permissions. The app does not read your files unless you explicitly select them in the file picker.
