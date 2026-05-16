@@ -1,6 +1,7 @@
 package com.hffmnn.ocmobile;
 
 import android.annotation.SuppressLint;
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -43,6 +44,28 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
+
+    public static class ClipboardBridge {
+        private final Context context;
+        public ClipboardBridge(Context ctx) { this.context = ctx; }
+        @android.webkit.JavascriptInterface
+        public void copy(String text) {
+            android.content.ClipboardManager clipboard =
+                (android.content.ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
+            android.content.ClipData clip = android.content.ClipData.newPlainText("Copied Text", text);
+            clipboard.setPrimaryClip(clip);
+        }
+        @android.webkit.JavascriptInterface
+        public String paste() {
+            android.content.ClipboardManager clipboard =
+                (android.content.ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
+            if (clipboard.hasPrimaryClip() && clipboard.getPrimaryClip() != null) {
+                android.content.ClipData.Item item = clipboard.getPrimaryClip().getItemAt(0);
+                if (item.getText() != null) return item.getText().toString();
+            }
+            return "";
+        }
+    }
 
     private static final String TAG = "OCMobile";
     private static final String PREFS_NAME = "oc_settings";
@@ -107,6 +130,9 @@ public class MainActivity extends AppCompatActivity {
 
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
 
+        // Clipboard bridge for copy-to-clipboard support in WebView
+        webView.addJavascriptInterface(new ClipboardBridge(this), "AndroidClipboard");
+
         // File picker launcher
         filePickerLauncher = registerForActivityResult(
             new ActivityResultContracts.StartActivityForResult(),
@@ -169,6 +195,19 @@ public class MainActivity extends AppCompatActivity {
                     "    document.querySelector('meta[name=viewport]').content='width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no';" +
                     "  }" +
                     "  document.body.style.overscrollBehavior='none';" +
+                    "  if (window.AndroidClipboard) {" +
+                    "    if (!navigator.clipboard) navigator.clipboard = {};" +
+                    "    navigator.clipboard.writeText = function(text) {" +
+                    "      return new Promise(function(resolve, reject) {" +
+                    "        try { window.AndroidClipboard.copy(String(text)); resolve(); } catch(e) { reject(e); }" +
+                    "      });" +
+                    "    };" +
+                    "    navigator.clipboard.readText = function() {" +
+                    "      return new Promise(function(resolve, reject) {" +
+                    "        try { resolve(window.AndroidClipboard.paste() || ''); } catch(e) { reject(e); }" +
+                    "      });" +
+                    "    };" +
+                    "  }" +
                     "  if (!window.__ocEnterIntercept) {" +
                     "    window.__ocEnterIntercept = true;" +
                     "    document.addEventListener('keydown', function(e){" +
