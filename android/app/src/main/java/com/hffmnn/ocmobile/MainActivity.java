@@ -90,6 +90,7 @@ public class MainActivity extends AppCompatActivity {
     private static final String KEY_URL = "server_url";
     private static final String KEY_USER = "username";
     private static final String KEY_PASS = "password";
+    private static final String KEY_OPENAI = "openai_key";
     private static final String KEY_ZOOM = "zoom_level";
     private static final String DEFAULT_URL = "http://localhost:4096";
     private static final int DEFAULT_ZOOM = 100;
@@ -498,6 +499,12 @@ public class MainActivity extends AppCompatActivity {
         passInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         layout.addView(passInput);
 
+        EditText openaiInput = new EditText(this);
+        openaiInput.setHint("OpenAI API Key (optional, for Whisper)");
+        openaiInput.setText(prefs.getString(KEY_OPENAI, ""));
+        openaiInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        layout.addView(openaiInput);
+
         int currentZoom = prefs.getInt(KEY_ZOOM, DEFAULT_ZOOM);
         TextView zoomLabel = new TextView(this);
         zoomLabel.setText("Zoom: " + currentZoom + "%");
@@ -533,6 +540,7 @@ public class MainActivity extends AppCompatActivity {
                     .putString(KEY_URL, newUrl)
                     .putString(KEY_USER, userInput.getText().toString().trim())
                     .putString(KEY_PASS, passInput.getText().toString())
+                    .putString(KEY_OPENAI, openaiInput.getText().toString().trim())
                     .putInt(KEY_ZOOM, zoom)
                     .apply();
                 applyZoom();
@@ -798,38 +806,54 @@ public class MainActivity extends AppCompatActivity {
         recordingOverlay.setVisibility(View.VISIBLE);
         btnMicFab.setEnabled(false);
 
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        String openaiKey = prefs.getString(KEY_OPENAI, "");
+
         executor.execute(() -> {
-            try {
-                if (voskRecognizer == null) {
-                    voskRecognizer = new Recognizer(voskModel, 16000.0f);
-                } else {
-                    voskRecognizer.reset();
+            String text = null;
+            String error = null;
+
+            // Try Whisper API first if key is available
+            if (!openaiKey.isEmpty()) {
+                try {
+                    text = transcribeWithWhisper(audioBytes, openaiKey);
+                    Log.d(TAG, "Whisper transcription: " + text);
+                } catch (Exception e) {
+                    error = e.getMessage();
+                    Log.w(TAG, "Whisper API failed, falling back to Vosk: " + error);
                 }
-
-                voskRecognizer.acceptWaveForm(audioBytes, audioBytes.length);
-                String resultJson = voskRecognizer.getResult();
-                Log.d(TAG, "Vosk raw result: " + resultJson);
-
-                // Parse JSON result: {"text": "hello world"}
-                String text = extractVoskText(resultJson);
-
-                mainHandler.post(() -> {
-                    recordingOverlay.setVisibility(View.GONE);
-                    btnMicFab.setEnabled(true);
-                    if (text != null && !text.isEmpty()) {
-                        Log.d(TAG, "Transcribed: " + text);
-                        injectTextIntoPrompt(text);
-                    } else {
-                        Log.w(TAG, "Transcription empty");
-                    }
-                });
-            } catch (Exception e) {
-                Log.e(TAG, "Transcription failed: " + e.getMessage(), e);
-                mainHandler.post(() -> {
-                    recordingOverlay.setVisibility(View.GONE);
-                    btnMicFab.setEnabled(true);
-                });
             }
+
+            // Fall back to Vosk if Whisper failed or no key
+            if (text == null || text.isEmpty()) {
+                try {
+                    if (voskRecognizer == null) {
+                        voskRecognizer = new Recognizer(voskModel, 16000.0f);
+                    } else {
+                        voskRecognizer.reset();
+                    }
+                    voskRecognizer.acceptWaveForm(audioBytes, audioBytes.length);
+                    String resultJson = voskRecognizer.getResult();
+                    Log.d(TAG, "Vosk raw result: " + resultJson);
+                    text = extractVoskText(resultJson);
+                } catch (Exception e) {
+                    error = e.getMessage();
+                    Log.e(TAG, "Vosk transcription failed: " + error, e);
+                }
+            }
+
+            final String finalText = text;
+            final String finalError = error;
+            mainHandler.post(() -> {
+                recordingOverlay.setVisibility(View.GONE);
+                btnMicFab.setEnabled(true);
+                if (finalText != null && !finalText.isEmpty()) {
+                    Log.d(TAG, "Final transcription: " + finalText);
+                    injectTextIntoPrompt(finalText);
+                } else {
+                    Log.w(TAG, "Transcription empty. Error: " + finalError);
+                }
+            });
         });
     }
 
@@ -847,6 +871,104 @@ public class MainActivity extends AppCompatActivity {
         return json.substring(startQuote + 1, endQuote);
     }
 
+    // ==================== WHISPER API ====================
+
+    private String transcribeWithWhisper(byte[] pcmBytes, String apiKey) throws Exception {
+        byte[] wavBytes = pcmToWav(pcmBytes, 16000, (short) 1, (short) 16);
+
+        String boundary = "----FormBoundary" + System.currentTimeMillis();
+        java.net.URL url = new java.net.URL("https://api.openai.com/v1/audio/transcriptions");
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setDoOutput(true);
+        conn.setConnectTimeout(30000);
+        conn.setReadTimeout(60000);
+        conn.setRequestProperty("Authorization", "Bearer " + apiKey);
+        conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+
+        try (OutputStream out = conn.getOutputStream()) {
+            // file part
+            out.write(("--" + boundary + "\r\n").getBytes());
+            out.write(("Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n").getBytes());
+            out.write(("Content-Type: audio/wav\r\n\r\n").getBytes());
+            out.write(wavBytes);
+            out.write("\r\n".getBytes());
+
+            // model part
+            out.write(("--" + boundary + "\r\n").getBytes());
+            out.write(("Content-Disposition: form-data; name=\"model\"\r\n\r\n").getBytes());
+            out.write(("whisper-1\r\n").getBytes());
+
+            out.write(("--" + boundary + "--\r\n").getBytes());
+        }
+
+        int code = conn.getResponseCode();
+        InputStream in = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
+        ByteArrayOutputStream resp = new ByteArrayOutputStream();
+        byte[] buf = new byte[4096];
+        int read;
+        while ((read = in.read(buf)) != -1) {
+            resp.write(buf, 0, read);
+        }
+        in.close();
+        conn.disconnect();
+
+        String respStr = resp.toString("UTF-8");
+        Log.d(TAG, "Whisper API response: " + respStr);
+
+        if (code < 200 || code >= 300) {
+            throw new Exception("HTTP " + code + ": " + respStr);
+        }
+
+        // Parse {"text": "..."}
+        int textIdx = respStr.indexOf("\"text\"");
+        if (textIdx < 0) throw new Exception("No text field in response");
+        int colon = respStr.indexOf(':', textIdx);
+        int q1 = respStr.indexOf('"', colon + 1);
+        int q2 = respStr.indexOf('"', q1 + 1);
+        if (q1 < 0 || q2 < 0) throw new Exception("Malformed text field");
+        return respStr.substring(q1 + 1, q2);
+    }
+
+    private byte[] pcmToWav(byte[] pcm, int sampleRate, short channels, short bitsPerSample) {
+        int pcmLen = pcm.length;
+        int wavLen = pcmLen + 44;
+        byte[] wav = new byte[wavLen];
+        int byteRate = sampleRate * channels * bitsPerSample / 8;
+        int blockAlign = channels * bitsPerSample / 8;
+
+        // RIFF header
+        wav[0] = 'R'; wav[1] = 'I'; wav[2] = 'F'; wav[3] = 'F';
+        writeIntLE(wav, 4, wavLen - 8);
+        wav[8] = 'W'; wav[9] = 'A'; wav[10] = 'V'; wav[11] = 'E';
+        // fmt chunk
+        wav[12] = 'f'; wav[13] = 'm'; wav[14] = 't'; wav[15] = ' ';
+        writeIntLE(wav, 16, 16); // subchunk1Size
+        writeShortLE(wav, 20, (short) 1); // audioFormat PCM
+        writeShortLE(wav, 22, channels);
+        writeIntLE(wav, 24, sampleRate);
+        writeIntLE(wav, 28, byteRate);
+        writeShortLE(wav, 32, (short) blockAlign);
+        writeShortLE(wav, 34, bitsPerSample);
+        // data chunk
+        wav[36] = 'd'; wav[37] = 'a'; wav[38] = 't'; wav[39] = 'a';
+        writeIntLE(wav, 40, pcmLen);
+        System.arraycopy(pcm, 0, wav, 44, pcmLen);
+        return wav;
+    }
+
+    private void writeIntLE(byte[] arr, int offset, int value) {
+        arr[offset] = (byte) (value & 0xFF);
+        arr[offset + 1] = (byte) ((value >> 8) & 0xFF);
+        arr[offset + 2] = (byte) ((value >> 16) & 0xFF);
+        arr[offset + 3] = (byte) ((value >> 24) & 0xFF);
+    }
+
+    private void writeShortLE(byte[] arr, int offset, short value) {
+        arr[offset] = (byte) (value & 0xFF);
+        arr[offset + 1] = (byte) ((value >> 8) & 0xFF);
+    }
+
     private void injectTextIntoPrompt(String text) {
         if (webView == null || webView.getUrl() == null) return;
 
@@ -859,23 +981,49 @@ public class MainActivity extends AppCompatActivity {
 
         String script =
             "(function(text){" +
-            "  var el = document.activeElement;" +
-            "  if (!el || !((el.tagName==='TEXTAREA') || (el.tagName==='INPUT') || el.isContentEditable)) {" +
-            "    el = document.querySelector('textarea, [contenteditable=\"true\"], input[type=\"text\"]');" +
+            "  function findInput() {" +
+            "    var el = document.activeElement;" +
+            "    if (el && (el.tagName==='TEXTAREA' || el.tagName==='INPUT' || el.isContentEditable)) return el;" +
+            "    var selectors = [" +
+            "      'textarea[placeholder*=\"Ask\"]'," +
+            "      '[contenteditable=\"true\"]'," +
+            "      'textarea'," +
+            "      'input[type=\"text\"]'" +
+            "    ];" +
+            "    for (var i=0;i<selectors.length;i++) {" +
+            "      var found = document.querySelector(selectors[i]);" +
+            "      if (found) return found;" +
+            "    }" +
+            "    return null;" +
             "  }" +
+            "  var el = findInput();" +
             "  if (!el) return 'no-input-found';" +
+            "  el.focus();" +
             "  if (el.tagName==='TEXTAREA' || el.tagName==='INPUT') {" +
             "    var start = el.selectionStart || el.value.length;" +
             "    var end = el.selectionEnd || el.value.length;" +
-            "    el.value = el.value.substring(0,start) + text + el.value.substring(end);" +
+            "    var before = el.value.substring(0,start);" +
+            "    var after = el.value.substring(end);" +
+            "    el.value = before + text + after;" +
             "    el.selectionStart = el.selectionEnd = start + text.length;" +
+            "    el.scrollTop = el.scrollHeight;" +
+            "    var ev = new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text });" +
+            "    el.dispatchEvent(ev);" +
+            "    el.dispatchEvent(new Event('change',{bubbles:true}));" +
             "  } else if (el.isContentEditable) {" +
+            "    var sel = window.getSelection();" +
+            "    if (sel && sel.rangeCount) sel.removeAllRanges();" +
+            "    var range = document.createRange();" +
+            "    range.selectNodeContents(el);" +
+            "    range.collapse(false);" +
+            "    sel.addRange(range);" +
             "    document.execCommand('insertText', false, text);" +
+            "    var ev = new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text });" +
+            "    el.dispatchEvent(ev);" +
+            "  } else {" +
+            "    return 'not-editable';" +
             "  }" +
-            "  el.dispatchEvent(new Event('input',{bubbles:true}));" +
-            "  el.dispatchEvent(new Event('change',{bubbles:true}));" +
-            "  el.focus();" +
-            "  return 'injected';" +
+            "  return 'injected-' + (el.tagName || 'contenteditable');" +
             "})('" + escaped + "')";
 
         webView.evaluateJavascript(script, value -> {
