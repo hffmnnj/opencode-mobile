@@ -757,14 +757,19 @@ public class MainActivity extends AppCompatActivity {
         recordingThread = new Thread(() -> {
             java.util.ArrayList<Short> shortBuffer = new java.util.ArrayList<>();
             short[] buffer = new short[bufferSize];
-            while (isRecording) {
-                int read = audioRecord.read(buffer, 0, buffer.length);
-                if (read > 0) {
-                    for (int i = 0; i < read; i++) {
-                        shortBuffer.add(buffer[i]);
+            try {
+                while (isRecording) {
+                    int read = audioRecord.read(buffer, 0, buffer.length);
+                    if (read > 0) {
+                        for (int i = 0; i < read; i++) {
+                            shortBuffer.add(buffer[i]);
+                        }
                     }
                 }
+            } catch (Exception e) {
+                Log.e(TAG, "Recording thread exception: " + e.getMessage(), e);
             }
+            Log.d(TAG, "Recording thread finished, buffer size=" + shortBuffer.size());
             // Convert shorts to float[] for Moonshine
             final float[] audioFloats = new float[shortBuffer.size()];
             for (int i = 0; i < shortBuffer.size(); i++) {
@@ -792,8 +797,11 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void runTranscription(float[] audioFloats) {
+        Log.d(TAG, "runTranscription called, samples=" + (audioFloats != null ? audioFloats.length : 0));
         if (audioFloats == null || audioFloats.length == 0) {
             Log.w(TAG, "No audio recorded");
+            isTranscribing = false;
+            btnMicFab.setEnabled(true);
             return;
         }
         if (isTranscribing) {
@@ -812,55 +820,54 @@ public class MainActivity extends AppCompatActivity {
         executor.execute(() -> {
             String text = null;
             String error = null;
-
-            // Try Whisper API first if key is available
-            if (!openaiKey.isEmpty()) {
-                try {
-                    // Convert float[] back to PCM bytes for Whisper API
-                    byte[] pcmBytes = floatsToPcmBytes(audioFloats);
-                    text = transcribeWithWhisper(pcmBytes, openaiKey);
-                    Log.d(TAG, "Whisper transcription: " + text);
-                } catch (Exception e) {
-                    error = e.getMessage();
-                    Log.w(TAG, "Whisper API failed, falling back to Moonshine: " + error);
-                }
-            }
-
-            // Fall back to Moonshine if Whisper failed or no key
-            if (text == null || text.isEmpty()) {
-                try {
-                    Transcript transcript = moonshineTranscriber.transcribeWithoutStreaming(audioFloats, 16000);
-                    if (transcript != null && transcript.lines != null && !transcript.lines.isEmpty()) {
-                        StringBuilder sb = new StringBuilder();
-                        for (ai.moonshine.voice.TranscriptLine line : transcript.lines) {
-                            if (line.text != null && !line.text.isEmpty()) {
-                                if (sb.length() > 0) sb.append(" ");
-                                sb.append(line.text);
-                            }
-                        }
-                        text = sb.toString().trim();
+            try {
+                // Try Whisper API first if key is available
+                if (!openaiKey.isEmpty()) {
+                    try {
+                        byte[] pcmBytes = floatsToPcmBytes(audioFloats);
+                        text = transcribeWithWhisper(pcmBytes, openaiKey);
+                        Log.d(TAG, "Whisper transcription: " + text);
+                    } catch (Exception e) {
+                        error = e.getMessage();
+                        Log.w(TAG, "Whisper API failed, falling back to Moonshine: " + error);
                     }
-                    Log.d(TAG, "Moonshine transcription: " + text);
-                } catch (Exception e) {
-                    error = e.getMessage();
-                    Log.e(TAG, "Moonshine transcription failed: " + error, e);
                 }
-            }
 
-            final String finalText = text;
-            final String finalError = error;
-            mainHandler.post(() -> {
-                isTranscribing = false;
-                recordingOverlay.setVisibility(View.GONE);
-                btnMicFab.setEnabled(true);
-                if (finalText != null && !finalText.isEmpty()) {
-                    String deduped = deduplicateRepeatedWords(finalText);
-                    Log.d(TAG, "Final transcription: " + finalText + " (deduped: " + deduped + ")");
-                    injectTextIntoPrompt(deduped);
-                } else {
-                    Log.w(TAG, "Transcription empty. Error: " + finalError);
+                // Fall back to Moonshine if Whisper failed or no key
+                if (text == null || text.isEmpty()) {
+                    try {
+                        Transcript transcript = moonshineTranscriber.transcribeWithoutStreaming(audioFloats, 16000);
+                        if (transcript != null && transcript.lines != null && !transcript.lines.isEmpty()) {
+                            StringBuilder sb = new StringBuilder();
+                            for (ai.moonshine.voice.TranscriptLine line : transcript.lines) {
+                                if (line.text != null && !line.text.isEmpty()) {
+                                    if (sb.length() > 0) sb.append(" ");
+                                    sb.append(line.text);
+                                }
+                            }
+                            text = sb.toString().trim();
+                        }
+                        Log.d(TAG, "Moonshine transcription: " + text);
+                    } catch (Exception e) {
+                        error = e.getMessage();
+                        Log.e(TAG, "Moonshine transcription failed: " + error, e);
+                    }
                 }
-            });
+            } finally {
+                final String finalText = text;
+                final String finalError = error;
+                mainHandler.post(() -> {
+                    isTranscribing = false;
+                    recordingOverlay.setVisibility(View.GONE);
+                    btnMicFab.setEnabled(true);
+                    if (finalText != null && !finalText.isEmpty()) {
+                        Log.d(TAG, "Final transcription: " + finalText);
+                        injectTextIntoPrompt(finalText);
+                    } else {
+                        Log.w(TAG, "Transcription empty. Error: " + finalError);
+                    }
+                });
+            }
         });
     }
 
@@ -1000,15 +1007,6 @@ public class MainActivity extends AppCompatActivity {
         if (webView == null || webView.getUrl() == null) return;
         if (text == null || text.isEmpty()) return;
 
-        // Debounce: don't inject the exact same text within 2 seconds
-        long now = System.currentTimeMillis();
-        if (text.equals(lastInjectedText) && (now - lastInjectedTime) < 2000) {
-            Log.w(TAG, "Duplicate injection suppressed: " + text);
-            return;
-        }
-        lastInjectedText = text;
-        lastInjectedTime = now;
-
         // Escape the text for JavaScript string literal
         String escaped = text.replace("\\", "\\\\")
                 .replace("'", "\\'")
@@ -1041,14 +1039,7 @@ public class MainActivity extends AppCompatActivity {
             "    var end = el.selectionEnd || el.value.length;" +
             "    var before = el.value.substring(0,start);" +
             "    var after = el.value.substring(end);" +
-            "    // Avoid injecting duplicate text if it already exists at cursor" +
-            "    if (before.endsWith(text) || el.value.indexOf(text) !== -1) {" +
-            "      return 'already-present';" +
-            "    }" +
-            "    var newVal = before + text + after;" +
-            "    // Use native setter for React compatibility" +
-            "    var nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype || window.HTMLInputElement.prototype, 'value').set;" +
-            "    if (nativeInputValueSetter) { nativeInputValueSetter.call(el, newVal); } else { el.value = newVal; }" +
+            "    el.value = before + text + after;" +
             "    el.selectionStart = el.selectionEnd = start + text.length;" +
             "    el.scrollTop = el.scrollHeight;" +
             "    var ev = new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text });" +
