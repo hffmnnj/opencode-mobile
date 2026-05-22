@@ -28,3 +28,4 @@ android/app/src/main/assets/public/
 # Signing
 *.jks
 *.keystore
+android/app/src/main/assets/base-en/

@@ -24,6 +24,8 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.SeekBar;
@@ -42,6 +44,26 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+
+import ai.moonshine.voice.JNI;
+import ai.moonshine.voice.Transcriber;
+import ai.moonshine.voice.Transcript;
+import ai.moonshine.voice.TranscriptEvent;
+import ai.moonshine.voice.TranscriptEventListener;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.ByteArrayOutputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+import android.media.AudioFormat;
+import android.media.AudioRecord;
+import android.media.MediaRecorder;
+import android.widget.FrameLayout;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -72,6 +94,7 @@ public class MainActivity extends AppCompatActivity {
     private static final String KEY_URL = "server_url";
     private static final String KEY_USER = "username";
     private static final String KEY_PASS = "password";
+    private static final String KEY_OPENAI = "openai_key";
     private static final String KEY_ZOOM = "zoom_level";
     private static final String DEFAULT_URL = "http://localhost:4096";
     private static final int DEFAULT_ZOOM = 100;
@@ -81,9 +104,38 @@ public class MainActivity extends AppCompatActivity {
     private ProgressBar progressBar;
     private LinearLayout errorView;
     private TextView errorText;
-    private MaterialButton btnSettingsFab;
+    private ImageButton btnSettingsFab;
     private MaterialButton btnRetry;
     private MaterialButton btnSettings;
+
+    // Voice input UI
+    private ImageButton btnMicFab;
+    private FrameLayout recordingOverlay;
+    private TextView recordingStatus;
+    private TextView recordingTimer;
+    private ImageButton btnStopRecording;
+    private View pulseRing1;
+    private View pulseRing2;
+    private android.animation.ObjectAnimator pulseAnim1;
+    private android.animation.ObjectAnimator pulseAnim2;
+
+    // Voice input state
+    private volatile boolean isRecording = false;
+    private volatile boolean isTranscribing = false;
+    private String lastInjectedText = "";
+    private long lastInjectedTime = 0;
+    private AudioRecord audioRecord;
+    private Thread recordingThread;
+    private File recordingFile;
+    private final Handler timerHandler = new Handler(Looper.getMainLooper());
+    private long recordingStartTime;
+    private Runnable timerRunnable;
+
+    // Moonshine STT
+    private Transcriber moonshineTranscriber;
+    private boolean moonshineModelReady = false;
+    private static final String MOONSHINE_MODEL_PATH = "base-en";
+    private static final int MOONSHINE_MODEL_ARCH = JNI.MOONSHINE_MODEL_ARCH_BASE;
 
     private ValueCallback<Uri[]> filePathCallback;
     private ActivityResultLauncher<Intent> filePickerLauncher;
@@ -287,6 +339,24 @@ public class MainActivity extends AppCompatActivity {
         btnSettings.setOnClickListener(v -> showSettingsDialog());
         btnSettingsFab.setOnClickListener(v -> showSettingsDialog());
 
+        // Voice input UI
+        // Voice input UI
+        btnMicFab = findViewById(R.id.btn_mic_fab);
+        btnSettingsFab = findViewById(R.id.btn_settings_fab);
+        recordingOverlay = findViewById(R.id.recording_overlay);
+        recordingStatus = findViewById(R.id.recording_status);
+        recordingTimer = findViewById(R.id.recording_timer);
+        btnStopRecording = findViewById(R.id.btn_stop_recording);
+        pulseRing1 = findViewById(R.id.pulse_ring_1);
+        pulseRing2 = findViewById(R.id.pulse_ring_2);
+
+        btnMicFab.setOnClickListener(v -> onMicButtonClicked());
+        btnSettingsFab.setOnClickListener(v -> showSettingsDialog());
+        btnStopRecording.setOnClickListener(v -> stopRecordingAndTranscribe());
+
+        // Initialize Moonshine model in background
+        initMoonshineModel();
+
         requestMediaPermissions();
         applyZoom();
         connect();
@@ -298,12 +368,14 @@ public class MainActivity extends AppCompatActivity {
             perms = new String[]{
                 android.Manifest.permission.READ_MEDIA_IMAGES,
                 android.Manifest.permission.READ_MEDIA_VIDEO,
-                android.Manifest.permission.CAMERA
+                android.Manifest.permission.CAMERA,
+                android.Manifest.permission.RECORD_AUDIO
             };
         } else {
             perms = new String[]{
                 android.Manifest.permission.READ_EXTERNAL_STORAGE,
-                android.Manifest.permission.CAMERA
+                android.Manifest.permission.CAMERA,
+                android.Manifest.permission.RECORD_AUDIO
             };
         }
 
@@ -433,6 +505,12 @@ public class MainActivity extends AppCompatActivity {
         passInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         layout.addView(passInput);
 
+        EditText openaiInput = new EditText(this);
+        openaiInput.setHint("OpenAI API Key (optional, for Whisper)");
+        openaiInput.setText(prefs.getString(KEY_OPENAI, ""));
+        openaiInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        layout.addView(openaiInput);
+
         int currentZoom = prefs.getInt(KEY_ZOOM, DEFAULT_ZOOM);
         TextView zoomLabel = new TextView(this);
         zoomLabel.setText("Zoom: " + currentZoom + "%");
@@ -468,6 +546,7 @@ public class MainActivity extends AppCompatActivity {
                     .putString(KEY_URL, newUrl)
                     .putString(KEY_USER, userInput.getText().toString().trim())
                     .putString(KEY_PASS, passInput.getText().toString())
+                    .putString(KEY_OPENAI, openaiInput.getText().toString().trim())
                     .putInt(KEY_ZOOM, zoom)
                     .apply();
                 applyZoom();
@@ -591,5 +670,485 @@ public class MainActivity extends AppCompatActivity {
     protected void onDestroy() {
         super.onDestroy();
         executor.shutdown();
+        if (audioRecord != null) {
+            audioRecord.release();
+        }
+        if (moonshineTranscriber != null) {
+            // Transcriber auto-frees in finalize()
+        }
+    }
+
+    // ==================== VOICE INPUT ====================
+
+    private void initMoonshineModel() {
+        executor.execute(() -> {
+            try {
+                moonshineTranscriber = new Transcriber();
+                moonshineTranscriber.loadFromAssets(MainActivity.this, MOONSHINE_MODEL_PATH, MOONSHINE_MODEL_ARCH);
+                moonshineModelReady = true;
+                Log.d(TAG, "Moonshine model loaded successfully");
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to load Moonshine model: " + e.getMessage(), e);
+            }
+        });
+    }
+
+    private void onMicButtonClicked() {
+        if (isRecording) {
+            stopRecordingAndTranscribe();
+            return;
+        }
+
+        // Check audio permission
+        if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.RECORD_AUDIO}, PERM_REQUEST);
+            return;
+        }
+
+        // Check model ready
+        if (!moonshineModelReady) {
+            recordingStatus.setText("Loading voice model...");
+            recordingOverlay.setVisibility(View.VISIBLE);
+            btnMicFab.setEnabled(false);
+            return;
+        }
+
+        startRecording();
+    }
+
+    private void startRecording() {
+        isRecording = true;
+        recordingOverlay.setVisibility(View.VISIBLE);
+        recordingStatus.setText("Listening...");
+        btnMicFab.setEnabled(false);
+        startPulseAnimation();
+
+        // Start timer
+        recordingStartTime = System.currentTimeMillis();
+        timerRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (!isRecording) return;
+                long elapsed = System.currentTimeMillis() - recordingStartTime;
+                recordingTimer.setText(formatTimer(elapsed));
+                timerHandler.postDelayed(this, 500);
+            }
+        };
+        timerHandler.post(timerRunnable);
+
+        // Audio config: 16kHz, mono, 16-bit PCM
+        final int sampleRate = 16000;
+        final int channelConfig = AudioFormat.CHANNEL_IN_MONO;
+        final int audioFormat = AudioFormat.ENCODING_PCM_16BIT;
+        final int bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat);
+
+        audioRecord = new AudioRecord(MediaRecorder.AudioSource.MIC,
+                sampleRate, channelConfig, audioFormat, bufferSize);
+
+        if (audioRecord.getState() != AudioRecord.STATE_INITIALIZED) {
+            Log.e(TAG, "AudioRecord failed to initialize");
+            stopRecordingAndTranscribe();
+            return;
+        }
+
+        audioRecord.startRecording();
+
+        recordingThread = new Thread(() -> {
+            java.util.ArrayList<Short> shortBuffer = new java.util.ArrayList<>();
+            short[] buffer = new short[bufferSize];
+            try {
+                while (isRecording) {
+                    int read = audioRecord.read(buffer, 0, buffer.length);
+                    if (read > 0) {
+                        for (int i = 0; i < read; i++) {
+                            shortBuffer.add(buffer[i]);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Recording thread exception: " + e.getMessage(), e);
+            }
+            Log.d(TAG, "Recording thread finished, buffer size=" + shortBuffer.size());
+            // Convert shorts to float[] for Moonshine
+            final float[] audioFloats = new float[shortBuffer.size()];
+            for (int i = 0; i < shortBuffer.size(); i++) {
+                audioFloats[i] = shortBuffer.get(i) / 32768.0f;
+            }
+            mainHandler.post(() -> runTranscription(audioFloats));
+        });
+        recordingThread.start();
+    }
+
+    private void stopRecordingAndTranscribe() {
+        if (!isRecording) return;
+        isRecording = false;
+        timerHandler.removeCallbacks(timerRunnable);
+        stopPulseAnimation();
+        recordingOverlay.setVisibility(View.GONE);
+        recordingStatus.setText("Listening...");
+        btnMicFab.setEnabled(true);
+
+        if (audioRecord != null) {
+            audioRecord.stop();
+            audioRecord.release();
+            audioRecord = null;
+        }
+    }
+
+    private void runTranscription(float[] audioFloats) {
+        Log.d(TAG, "runTranscription called, samples=" + (audioFloats != null ? audioFloats.length : 0));
+        if (audioFloats == null || audioFloats.length == 0) {
+            Log.w(TAG, "No audio recorded");
+            isTranscribing = false;
+            btnMicFab.setEnabled(true);
+            return;
+        }
+        if (isTranscribing) {
+            Log.w(TAG, "Transcription already in progress, ignoring duplicate call");
+            return;
+        }
+        isTranscribing = true;
+
+        recordingStatus.setText("Transcribing...");
+        recordingOverlay.setVisibility(View.VISIBLE);
+        btnMicFab.setEnabled(false);
+
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        String openaiKey = prefs.getString(KEY_OPENAI, "");
+
+        executor.execute(() -> {
+            String text = null;
+            String error = null;
+            try {
+                // Try Whisper API first if key is available
+                if (!openaiKey.isEmpty()) {
+                    try {
+                        byte[] pcmBytes = floatsToPcmBytes(audioFloats);
+                        text = transcribeWithWhisper(pcmBytes, openaiKey);
+                        Log.d(TAG, "Whisper transcription: " + text);
+                    } catch (Exception e) {
+                        error = e.getMessage();
+                        Log.w(TAG, "Whisper API failed, falling back to Moonshine: " + error);
+                    }
+                }
+
+                // Fall back to Moonshine if Whisper failed or no key
+                if (text == null || text.isEmpty()) {
+                    try {
+                        Transcript transcript = moonshineTranscriber.transcribeWithoutStreaming(audioFloats, 16000);
+                        if (transcript != null && transcript.lines != null && !transcript.lines.isEmpty()) {
+                            StringBuilder sb = new StringBuilder();
+                            for (ai.moonshine.voice.TranscriptLine line : transcript.lines) {
+                                if (line.text != null && !line.text.isEmpty()) {
+                                    if (sb.length() > 0) sb.append(" ");
+                                    sb.append(line.text);
+                                }
+                            }
+                            text = sb.toString().trim();
+                        }
+                        Log.d(TAG, "Moonshine transcription: " + text);
+                    } catch (Exception e) {
+                        error = e.getMessage();
+                        Log.e(TAG, "Moonshine transcription failed: " + error, e);
+                    }
+                }
+            } finally {
+                final String finalText = text;
+                final String finalError = error;
+                mainHandler.post(() -> {
+                    isTranscribing = false;
+                    recordingOverlay.setVisibility(View.GONE);
+                    btnMicFab.setEnabled(true);
+                    if (finalText != null && !finalText.isEmpty()) {
+                        Log.d(TAG, "Final transcription: " + finalText);
+                        injectTextIntoPrompt(finalText);
+                    } else {
+                        Log.w(TAG, "Transcription empty. Error: " + finalError);
+                    }
+                });
+            }
+        });
+    }
+
+    private byte[] floatsToPcmBytes(float[] audioFloats) {
+        short[] shorts = new short[audioFloats.length];
+        for (int i = 0; i < audioFloats.length; i++) {
+            float clamped = Math.max(-1.0f, Math.min(1.0f, audioFloats[i]));
+            shorts[i] = (short) (clamped * 32767.0f);
+        }
+        ByteBuffer buf = ByteBuffer.allocate(shorts.length * 2);
+        buf.order(ByteOrder.LITTLE_ENDIAN);
+        for (short s : shorts) buf.putShort(s);
+        return buf.array();
+    }
+
+    // ==================== WHISPER API ====================
+
+    private String transcribeWithWhisper(byte[] pcmBytes, String apiKey) throws Exception {
+        byte[] wavBytes = pcmToWav(pcmBytes, 16000, (short) 1, (short) 16);
+
+        String boundary = "----FormBoundary" + System.currentTimeMillis();
+        java.net.URL url = new java.net.URL("https://api.openai.com/v1/audio/transcriptions");
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setDoOutput(true);
+        conn.setConnectTimeout(30000);
+        conn.setReadTimeout(60000);
+        conn.setRequestProperty("Authorization", "Bearer " + apiKey);
+        conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+
+        try (OutputStream out = conn.getOutputStream()) {
+            // file part
+            out.write(("--" + boundary + "\r\n").getBytes());
+            out.write(("Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n").getBytes());
+            out.write(("Content-Type: audio/wav\r\n\r\n").getBytes());
+            out.write(wavBytes);
+            out.write("\r\n".getBytes());
+
+            // model part
+            out.write(("--" + boundary + "\r\n").getBytes());
+            out.write(("Content-Disposition: form-data; name=\"model\"\r\n\r\n").getBytes());
+            out.write(("whisper-1\r\n").getBytes());
+
+            out.write(("--" + boundary + "--\r\n").getBytes());
+        }
+
+        int code = conn.getResponseCode();
+        InputStream in = (code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream();
+        ByteArrayOutputStream resp = new ByteArrayOutputStream();
+        byte[] buf = new byte[4096];
+        int read;
+        while ((read = in.read(buf)) != -1) {
+            resp.write(buf, 0, read);
+        }
+        in.close();
+        conn.disconnect();
+
+        String respStr = resp.toString("UTF-8");
+        Log.d(TAG, "Whisper API response: " + respStr);
+
+        if (code < 200 || code >= 300) {
+            throw new Exception("HTTP " + code + ": " + respStr);
+        }
+
+        // Parse {"text": "..."}
+        int textIdx = respStr.indexOf("\"text\"");
+        if (textIdx < 0) throw new Exception("No text field in response");
+        int colon = respStr.indexOf(':', textIdx);
+        int q1 = respStr.indexOf('"', colon + 1);
+        int q2 = respStr.indexOf('"', q1 + 1);
+        if (q1 < 0 || q2 < 0) throw new Exception("Malformed text field");
+        return respStr.substring(q1 + 1, q2);
+    }
+
+    private byte[] pcmToWav(byte[] pcm, int sampleRate, short channels, short bitsPerSample) {
+        int pcmLen = pcm.length;
+        int wavLen = pcmLen + 44;
+        byte[] wav = new byte[wavLen];
+        int byteRate = sampleRate * channels * bitsPerSample / 8;
+        int blockAlign = channels * bitsPerSample / 8;
+
+        // RIFF header
+        wav[0] = 'R'; wav[1] = 'I'; wav[2] = 'F'; wav[3] = 'F';
+        writeIntLE(wav, 4, wavLen - 8);
+        wav[8] = 'W'; wav[9] = 'A'; wav[10] = 'V'; wav[11] = 'E';
+        // fmt chunk
+        wav[12] = 'f'; wav[13] = 'm'; wav[14] = 't'; wav[15] = ' ';
+        writeIntLE(wav, 16, 16); // subchunk1Size
+        writeShortLE(wav, 20, (short) 1); // audioFormat PCM
+        writeShortLE(wav, 22, channels);
+        writeIntLE(wav, 24, sampleRate);
+        writeIntLE(wav, 28, byteRate);
+        writeShortLE(wav, 32, (short) blockAlign);
+        writeShortLE(wav, 34, bitsPerSample);
+        // data chunk
+        wav[36] = 'd'; wav[37] = 'a'; wav[38] = 't'; wav[39] = 'a';
+        writeIntLE(wav, 40, pcmLen);
+        System.arraycopy(pcm, 0, wav, 44, pcmLen);
+        return wav;
+    }
+
+    private void writeIntLE(byte[] arr, int offset, int value) {
+        arr[offset] = (byte) (value & 0xFF);
+        arr[offset + 1] = (byte) ((value >> 8) & 0xFF);
+        arr[offset + 2] = (byte) ((value >> 16) & 0xFF);
+        arr[offset + 3] = (byte) ((value >> 24) & 0xFF);
+    }
+
+    private void writeShortLE(byte[] arr, int offset, short value) {
+        arr[offset] = (byte) (value & 0xFF);
+        arr[offset + 1] = (byte) ((value >> 8) & 0xFF);
+    }
+
+    private String deduplicateRepeatedWords(String text) {
+        if (text == null || text.isEmpty()) return text;
+        String[] words = text.trim().split("\\s+");
+        if (words.length < 3) return text;
+        StringBuilder sb = new StringBuilder();
+        sb.append(words[0]);
+        int repeatCount = 1;
+        for (int i = 1; i < words.length; i++) {
+            if (words[i].equalsIgnoreCase(words[i - 1])) {
+                repeatCount++;
+                // Allow up to 2 consecutive identical words, collapse beyond that
+                if (repeatCount <= 2) {
+                    sb.append(" ").append(words[i]);
+                }
+            } else {
+                repeatCount = 1;
+                sb.append(" ").append(words[i]);
+            }
+        }
+        return sb.toString();
+    }
+
+    private void injectTextIntoPrompt(String text) {
+        if (webView == null || webView.getUrl() == null) return;
+        if (text == null || text.isEmpty()) return;
+
+        // Escape the text for JavaScript string literal
+        String escaped = text.replace("\\", "\\\\")
+                .replace("'", "\\'")
+                .replace("\"", "\\\"")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r");
+
+        String script =
+            "(function(text){" +
+            "  function findInput() {" +
+            "    var el = document.activeElement;" +
+            "    if (el && (el.tagName==='TEXTAREA' || el.tagName==='INPUT' || el.isContentEditable)) return el;" +
+            "    var selectors = [" +
+            "      'textarea[placeholder*=\"Ask\"]'," +
+            "      '[contenteditable=\"true\"]'," +
+            "      'textarea'," +
+            "      'input[type=\"text\"]'" +
+            "    ];" +
+            "    for (var i=0;i<selectors.length;i++) {" +
+            "      var found = document.querySelector(selectors[i]);" +
+            "      if (found) return found;" +
+            "    }" +
+            "    return null;" +
+            "  }" +
+            "  var el = findInput();" +
+            "  if (!el) return 'no-input-found';" +
+            "  el.focus();" +
+            "  if (el.tagName==='TEXTAREA' || el.tagName==='INPUT') {" +
+            "    var start = el.selectionStart || el.value.length;" +
+            "    var end = el.selectionEnd || el.value.length;" +
+            "    var before = el.value.substring(0,start);" +
+            "    var after = el.value.substring(end);" +
+            "    el.value = before + text + after;" +
+            "    el.selectionStart = el.selectionEnd = start + text.length;" +
+            "    el.scrollTop = el.scrollHeight;" +
+            "    var ev = new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text });" +
+            "    el.dispatchEvent(ev);" +
+            "    el.dispatchEvent(new Event('change',{bubbles:true}));" +
+            "  } else if (el.isContentEditable) {" +
+            "    var sel = window.getSelection();" +
+            "    if (sel && sel.rangeCount) sel.removeAllRanges();" +
+            "    var range = document.createRange();" +
+            "    range.selectNodeContents(el);" +
+            "    range.collapse(false);" +
+            "    sel.addRange(range);" +
+            "    document.execCommand('insertText', false, text);" +
+            "    var ev = new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text });" +
+            "    el.dispatchEvent(ev);" +
+            "  } else {" +
+            "    return 'not-editable';" +
+            "  }" +
+            "  return 'injected-' + (el.tagName || 'contenteditable');" +
+            "})('" + escaped + "')";
+
+        webView.evaluateJavascript(script, value -> {
+            Log.d(TAG, "Text injection result: " + value);
+        });
+    }
+
+    private String formatTimer(long ms) {
+        long sec = ms / 1000;
+        return String.format(java.util.Locale.US, "%d:%02d", sec / 60, sec % 60);
+    }
+
+    private void unzip(File zipFile, File targetDir) throws Exception {
+        try (ZipInputStream zis = new ZipInputStream(zipFile.toURI().toURL().openStream())) {
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                File outFile = new File(targetDir, entry.getName());
+                if (entry.isDirectory()) {
+                    outFile.mkdirs();
+                } else {
+                    outFile.getParentFile().mkdirs();
+                    try (FileOutputStream fos = new FileOutputStream(outFile)) {
+                        byte[] buf = new byte[4096];
+                        int read;
+                        while ((read = zis.read(buf)) != -1) {
+                            fos.write(buf, 0, read);
+                        }
+                    }
+                }
+                zis.closeEntry();
+            }
+        }
+    }
+
+    // ==================== PULSE ANIMATION ====================
+
+    private void startPulseAnimation() {
+        if (pulseRing1 == null || pulseRing2 == null) return;
+        pulseRing1.setScaleX(0.5f);
+        pulseRing1.setScaleY(0.5f);
+        pulseRing1.setAlpha(0.8f);
+        pulseRing2.setScaleX(0.5f);
+        pulseRing2.setScaleY(0.5f);
+        pulseRing2.setAlpha(0.8f);
+
+        pulseAnim1 = android.animation.ObjectAnimator.ofPropertyValuesHolder(
+            pulseRing1,
+            android.animation.PropertyValuesHolder.ofFloat("scaleX", 0.5f, 1.5f),
+            android.animation.PropertyValuesHolder.ofFloat("scaleY", 0.5f, 1.5f),
+            android.animation.PropertyValuesHolder.ofFloat("alpha", 0.8f, 0f)
+        );
+        pulseAnim1.setDuration(1500);
+        pulseAnim1.setRepeatCount(android.animation.ObjectAnimator.INFINITE);
+        pulseAnim1.setRepeatMode(android.animation.ObjectAnimator.RESTART);
+        pulseAnim1.setInterpolator(new android.view.animation.LinearInterpolator());
+
+        pulseAnim2 = android.animation.ObjectAnimator.ofPropertyValuesHolder(
+            pulseRing2,
+            android.animation.PropertyValuesHolder.ofFloat("scaleX", 0.5f, 1.5f),
+            android.animation.PropertyValuesHolder.ofFloat("scaleY", 0.5f, 1.5f),
+            android.animation.PropertyValuesHolder.ofFloat("alpha", 0.8f, 0f)
+        );
+        pulseAnim2.setDuration(1500);
+        pulseAnim2.setStartDelay(750);
+        pulseAnim2.setRepeatCount(android.animation.ObjectAnimator.INFINITE);
+        pulseAnim2.setRepeatMode(android.animation.ObjectAnimator.RESTART);
+        pulseAnim2.setInterpolator(new android.view.animation.LinearInterpolator());
+
+        pulseAnim1.start();
+        pulseAnim2.start();
+    }
+
+    private void stopPulseAnimation() {
+        if (pulseAnim1 != null) {
+            pulseAnim1.cancel();
+            pulseAnim1 = null;
+        }
+        if (pulseAnim2 != null) {
+            pulseAnim2.cancel();
+            pulseAnim2 = null;
+        }
+        if (pulseRing1 != null) {
+            pulseRing1.setScaleX(1f);
+            pulseRing1.setScaleY(1f);
+            pulseRing1.setAlpha(0.1f);
+        }
+        if (pulseRing2 != null) {
+            pulseRing2.setScaleX(1f);
+            pulseRing2.setScaleY(1f);
+            pulseRing2.setAlpha(0.1f);
+        }
     }
 }

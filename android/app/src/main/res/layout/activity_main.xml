@@ -15,12 +15,13 @@
 
     <ProgressBar
         android:id="@+id/progress"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
+        android:layout_width="24dp"
+        android:layout_height="24dp"
         android:layout_gravity="center"
         android:indeterminateTint="@color/accent"
         android:visibility="gone" />
 
+    <!-- Error view -->
     <LinearLayout
         android:id="@+id/error_view"
         android:layout_width="match_parent"
@@ -28,15 +29,17 @@
         android:gravity="center"
         android:orientation="vertical"
         android:visibility="gone"
-        android:padding="32dp">
+        android:padding="32dp"
+        android:background="@color/surface">
 
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="Connection Failed"
             android:textColor="@color/white"
-            android:textSize="20sp"
-            android:textStyle="bold" />
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:fontFamily="sans-serif-medium" />
 
         <TextView
             android:id="@+id/error_text"
@@ -45,7 +48,8 @@
             android:layout_marginTop="8dp"
             android:text="Server unreachable"
             android:textColor="@color/gray"
-            android:textSize="14sp" />
+            android:textSize="14sp"
+            android:fontFamily="sans-serif" />
 
         <LinearLayout
             android:layout_width="wrap_content"
@@ -56,41 +60,178 @@
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btn_retry"
                 android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
+                android:layout_height="40dp"
                 android:layout_marginEnd="8dp"
                 android:backgroundTint="@color/accent"
                 android:text="Retry"
                 android:textColor="@color/black"
-                app:cornerRadius="8dp" />
+                android:textSize="13sp"
+                android:fontFamily="sans-serif-medium"
+                android:letterSpacing="0.02"
+                app:cornerRadius="20dp" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btn_settings"
                 android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
+                android:layout_height="40dp"
                 android:backgroundTint="@color/dark_gray"
                 android:text="Settings"
                 android:textColor="@color/white"
-                app:cornerRadius="8dp" />
+                android:textSize="13sp"
+                android:fontFamily="sans-serif-medium"
+                android:letterSpacing="0.02"
+                app:cornerRadius="20dp" />
         </LinearLayout>
     </LinearLayout>
 
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/btn_settings_fab"
-        android:layout_width="32dp"
-        android:layout_height="32dp"
+    <!-- Floating action pill — mic + settings -->
+    <LinearLayout
+        android:id="@+id/fab_pill"
+        android:layout_width="wrap_content"
+        android:layout_height="44dp"
         android:layout_gravity="bottom|end"
-        android:layout_margin="16dp"
-        android:insetTop="0dp"
-        android:insetBottom="0dp"
-        android:insetLeft="0dp"
-        android:insetRight="0dp"
-        android:minWidth="0dp"
-        android:minHeight="0dp"
-        android:padding="0dp"
-        android:text="⚙"
-        android:textColor="@color/white"
-        android:textSize="14sp"
-        app:backgroundTint="@color/dark_gray"
-        app:cornerRadius="16dp" />
+        android:layout_marginEnd="14dp"
+        android:layout_marginBottom="14dp"
+        android:background="@drawable/pill_background"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="6dp"
+        android:paddingEnd="6dp"
+        android:elevation="8dp">
+
+        <ImageButton
+            android:id="@+id/btn_mic_fab"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/ic_microphone"
+            android:scaleType="centerInside"
+            android:contentDescription="Voice input" />
+
+        <View
+            android:layout_width="1dp"
+            android:layout_height="18dp"
+            android:layout_marginStart="2dp"
+            android:layout_marginEnd="2dp"
+            android:background="#22FFFFFF" />
+
+        <ImageButton
+            android:id="@+id/btn_settings_fab"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/ic_settings"
+            android:scaleType="centerInside"
+            android:contentDescription="Settings" />
+    </LinearLayout>
+
+    <!-- Recording overlay -->
+    <FrameLayout
+        android:id="@+id/recording_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#CC0d0d0d"
+        android:visibility="gone"
+        android:clickable="true"
+        android:focusable="true">
+
+        <!-- Top dismiss hint -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center|top"
+            android:layout_marginTop="48dp"
+            android:text="Tap stop to finish"
+            android:textColor="#66FFFFFF"
+            android:textSize="12sp"
+            android:fontFamily="sans-serif-medium"
+            android:letterSpacing="0.08" />
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:orientation="vertical"
+            android:gravity="center">
+
+            <!-- Pulse animation container -->
+            <FrameLayout
+                android:layout_width="160dp"
+                android:layout_height="160dp"
+                android:layout_gravity="center">
+
+                <View
+                    android:id="@+id/pulse_ring_1"
+                    android:layout_width="160dp"
+                    android:layout_height="160dp"
+                    android:layout_gravity="center"
+                    android:background="@drawable/pulse_circle" />
+
+                <View
+                    android:id="@+id/pulse_ring_2"
+                    android:layout_width="160dp"
+                    android:layout_height="160dp"
+                    android:layout_gravity="center"
+                    android:background="@drawable/pulse_circle" />
+
+                <!-- Solid dark circle behind mic -->
+                <View
+                    android:layout_width="80dp"
+                    android:layout_height="80dp"
+                    android:layout_gravity="center"
+                    android:background="@drawable/mic_circle" />
+
+                <ImageView
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_microphone"
+                    android:scaleType="centerInside" />
+            </FrameLayout>
+
+            <TextView
+                android:id="@+id/recording_status"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="32dp"
+                android:text="Listening..."
+                android:textColor="@color/accent"
+                android:textSize="16sp"
+                android:fontFamily="sans-serif-medium"
+                android:letterSpacing="0.08" />
+
+            <TextView
+                android:id="@+id/recording_timer"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="0:00"
+                android:textColor="#999999"
+                android:textSize="14sp"
+                android:fontFamily="sans-serif-medium"
+                android:letterSpacing="0.04" />
+
+        </LinearLayout>
+
+        <!-- Stop button at bottom center -->
+        <FrameLayout
+            android:layout_width="64dp"
+            android:layout_height="64dp"
+            android:layout_gravity="center|bottom"
+            android:layout_marginBottom="48dp"
+            android:background="@drawable/stop_button_circle">
+
+            <ImageButton
+                android:id="@+id/btn_stop_recording"
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:src="@drawable/ic_stop"
+                android:scaleType="centerInside"
+                android:padding="20dp"
+                android:contentDescription="Stop recording" />
+        </FrameLayout>
+
+    </FrameLayout>
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>
