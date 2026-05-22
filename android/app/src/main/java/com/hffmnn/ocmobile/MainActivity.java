@@ -109,6 +109,10 @@ public class MainActivity extends AppCompatActivity {
     private TextView recordingStatus;
     private TextView recordingTimer;
     private MaterialButton btnStopRecording;
+    private View pulseRing1;
+    private View pulseRing2;
+    private android.animation.ObjectAnimator pulseAnim1;
+    private android.animation.ObjectAnimator pulseAnim2;
 
     // Voice input state
     private boolean isRecording = false;
@@ -329,13 +333,18 @@ public class MainActivity extends AppCompatActivity {
         btnSettingsFab.setOnClickListener(v -> showSettingsDialog());
 
         // Voice input UI
+        // Voice input UI
         btnMicFab = findViewById(R.id.btn_mic_fab);
+        btnSettingsFab = findViewById(R.id.btn_settings_fab);
         recordingOverlay = findViewById(R.id.recording_overlay);
         recordingStatus = findViewById(R.id.recording_status);
         recordingTimer = findViewById(R.id.recording_timer);
         btnStopRecording = findViewById(R.id.btn_stop_recording);
+        pulseRing1 = findViewById(R.id.pulse_ring_1);
+        pulseRing2 = findViewById(R.id.pulse_ring_2);
 
         btnMicFab.setOnClickListener(v -> onMicButtonClicked());
+        btnSettingsFab.setOnClickListener(v -> showSettingsDialog());
         btnStopRecording.setOnClickListener(v -> stopRecordingAndTranscribe());
 
         // Initialize Vosk model in background
@@ -709,6 +718,7 @@ public class MainActivity extends AppCompatActivity {
         recordingOverlay.setVisibility(View.VISIBLE);
         recordingStatus.setText("Listening...");
         btnMicFab.setEnabled(false);
+        startPulseAnimation();
 
         // Start timer
         recordingStartTime = System.currentTimeMillis();
@@ -766,6 +776,7 @@ public class MainActivity extends AppCompatActivity {
         if (!isRecording) return;
         isRecording = false;
         timerHandler.removeCallbacks(timerRunnable);
+        stopPulseAnimation();
         recordingOverlay.setVisibility(View.GONE);
         recordingStatus.setText("Listening...");
         btnMicFab.setEnabled(true);
@@ -953,5 +964,64 @@ public class MainActivity extends AppCompatActivity {
         long minutes = seconds / 60;
         seconds = seconds % 60;
         return minutes + ":" + (seconds < 10 ? "0" : "") + seconds;
+    }
+
+    // ==================== PULSE ANIMATION ====================
+
+    private void startPulseAnimation() {
+        if (pulseRing1 == null || pulseRing2 == null) return;
+        pulseRing1.setScaleX(0.5f);
+        pulseRing1.setScaleY(0.5f);
+        pulseRing1.setAlpha(0.8f);
+        pulseRing2.setScaleX(0.5f);
+        pulseRing2.setScaleY(0.5f);
+        pulseRing2.setAlpha(0.8f);
+
+        pulseAnim1 = android.animation.ObjectAnimator.ofPropertyValuesHolder(
+            pulseRing1,
+            android.animation.PropertyValuesHolder.ofFloat("scaleX", 0.5f, 1.5f),
+            android.animation.PropertyValuesHolder.ofFloat("scaleY", 0.5f, 1.5f),
+            android.animation.PropertyValuesHolder.ofFloat("alpha", 0.8f, 0f)
+        );
+        pulseAnim1.setDuration(1500);
+        pulseAnim1.setRepeatCount(android.animation.ObjectAnimator.INFINITE);
+        pulseAnim1.setRepeatMode(android.animation.ObjectAnimator.RESTART);
+        pulseAnim1.setInterpolator(new android.view.animation.LinearInterpolator());
+
+        pulseAnim2 = android.animation.ObjectAnimator.ofPropertyValuesHolder(
+            pulseRing2,
+            android.animation.PropertyValuesHolder.ofFloat("scaleX", 0.5f, 1.5f),
+            android.animation.PropertyValuesHolder.ofFloat("scaleY", 0.5f, 1.5f),
+            android.animation.PropertyValuesHolder.ofFloat("alpha", 0.8f, 0f)
+        );
+        pulseAnim2.setDuration(1500);
+        pulseAnim2.setStartDelay(750);
+        pulseAnim2.setRepeatCount(android.animation.ObjectAnimator.INFINITE);
+        pulseAnim2.setRepeatMode(android.animation.ObjectAnimator.RESTART);
+        pulseAnim2.setInterpolator(new android.view.animation.LinearInterpolator());
+
+        pulseAnim1.start();
+        pulseAnim2.start();
+    }
+
+    private void stopPulseAnimation() {
+        if (pulseAnim1 != null) {
+            pulseAnim1.cancel();
+            pulseAnim1 = null;
+        }
+        if (pulseAnim2 != null) {
+            pulseAnim2.cancel();
+            pulseAnim2 = null;
+        }
+        if (pulseRing1 != null) {
+            pulseRing1.setScaleX(1f);
+            pulseRing1.setScaleY(1f);
+            pulseRing1.setAlpha(0.1f);
+        }
+        if (pulseRing2 != null) {
+            pulseRing2.setScaleX(1f);
+            pulseRing2.setScaleY(1f);
+            pulseRing2.setAlpha(0.1f);
+        }
     }
 }
