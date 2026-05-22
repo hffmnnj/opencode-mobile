@@ -88,55 +88,41 @@
     <LinearLayout
         android:id="@+id/fab_pill"
         android:layout_width="wrap_content"
-        android:layout_height="40dp"
+        android:layout_height="44dp"
         android:layout_gravity="bottom|end"
-        android:layout_marginEnd="16dp"
-        android:layout_marginBottom="84dp"
+        android:layout_marginEnd="14dp"
+        android:layout_marginBottom="14dp"
         android:background="@drawable/pill_background"
         android:orientation="horizontal"
         android:gravity="center_vertical"
-        android:paddingStart="4dp"
-        android:paddingEnd="4dp"
-        android:elevation="6dp">
+        android:paddingStart="6dp"
+        android:paddingEnd="6dp"
+        android:elevation="8dp">
 
-        <com.google.android.material.button.MaterialButton
+        <ImageButton
             android:id="@+id/btn_mic_fab"
             android:layout_width="36dp"
             android:layout_height="36dp"
-            android:insetTop="0dp"
-            android:insetBottom="0dp"
-            android:insetLeft="0dp"
-            android:insetRight="0dp"
-            android:minWidth="0dp"
-            android:minHeight="0dp"
-            android:padding="0dp"
-            android:text="🎤"
-            android:textColor="@color/accent"
-            android:textSize="16sp"
-            app:backgroundTint="@android:color/transparent"
-            app:cornerRadius="18dp" />
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/ic_microphone"
+            android:scaleType="centerInside"
+            android:contentDescription="Voice input" />
 
         <View
             android:layout_width="1dp"
-            android:layout_height="20dp"
-            android:background="#33FFFFFF" />
+            android:layout_height="18dp"
+            android:layout_marginStart="2dp"
+            android:layout_marginEnd="2dp"
+            android:background="#22FFFFFF" />
 
-        <com.google.android.material.button.MaterialButton
+        <ImageButton
             android:id="@+id/btn_settings_fab"
             android:layout_width="36dp"
             android:layout_height="36dp"
-            android:insetTop="0dp"
-            android:insetBottom="0dp"
-            android:insetLeft="0dp"
-            android:insetRight="0dp"
-            android:minWidth="0dp"
-            android:minHeight="0dp"
-            android:padding="0dp"
-            android:text="⚙"
-            android:textColor="@color/gray"
-            android:textSize="14sp"
-            app:backgroundTint="@android:color/transparent"
-            app:cornerRadius="18dp" />
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/ic_settings"
+            android:scaleType="centerInside"
+            android:contentDescription="Settings" />
     </LinearLayout>
 
     <!-- Recording overlay -->
@@ -144,10 +130,22 @@
         android:id="@+id/recording_overlay"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:background="#E6000000"
+        android:background="#CC0d0d0d"
         android:visibility="gone"
         android:clickable="true"
         android:focusable="true">
+
+        <!-- Top dismiss hint -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center|top"
+            android:layout_marginTop="48dp"
+            android:text="Tap stop to finish"
+            android:textColor="#66FFFFFF"
+            android:textSize="12sp"
+            android:fontFamily="sans-serif-medium"
+            android:letterSpacing="0.08" />
 
         <LinearLayout
             android:layout_width="wrap_content"
@@ -158,49 +156,49 @@
 
             <!-- Pulse animation container -->
             <FrameLayout
-                android:layout_width="120dp"
-                android:layout_height="120dp"
+                android:layout_width="160dp"
+                android:layout_height="160dp"
                 android:layout_gravity="center">
 
                 <View
                     android:id="@+id/pulse_ring_1"
-                    android:layout_width="120dp"
-                    android:layout_height="120dp"
+                    android:layout_width="160dp"
+                    android:layout_height="160dp"
                     android:layout_gravity="center"
                     android:background="@drawable/pulse_circle" />
 
                 <View
                     android:id="@+id/pulse_ring_2"
-                    android:layout_width="120dp"
-                    android:layout_height="120dp"
+                    android:layout_width="160dp"
+                    android:layout_height="160dp"
                     android:layout_gravity="center"
                     android:background="@drawable/pulse_circle" />
 
+                <!-- Solid dark circle behind mic -->
                 <View
-                    android:layout_width="64dp"
-                    android:layout_height="64dp"
+                    android:layout_width="80dp"
+                    android:layout_height="80dp"
                     android:layout_gravity="center"
                     android:background="@drawable/mic_circle" />
 
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
+                <ImageView
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
                     android:layout_gravity="center"
-                    android:text="🎤"
-                    android:textSize="28sp" />
+                    android:src="@drawable/ic_microphone"
+                    android:scaleType="centerInside" />
             </FrameLayout>
 
             <TextView
                 android:id="@+id/recording_status"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="24dp"
+                android:layout_marginTop="32dp"
                 android:text="Listening..."
                 android:textColor="@color/accent"
                 android:textSize="16sp"
-                android:textStyle="bold"
                 android:fontFamily="sans-serif-medium"
-                android:letterSpacing="0.05" />
+                android:letterSpacing="0.08" />
 
             <TextView
                 android:id="@+id/recording_timer"
@@ -208,25 +206,32 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
                 android:text="0:00"
-                android:textColor="@color/gray"
+                android:textColor="#999999"
                 android:textSize="14sp"
                 android:fontFamily="sans-serif-medium"
-                android:letterSpacing="0.03" />
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btn_stop_recording"
-                android:layout_width="wrap_content"
-                android:layout_height="40dp"
-                android:layout_marginTop="32dp"
-                android:backgroundTint="#FF4D4D"
-                android:text="Stop"
-                android:textColor="@color/white"
-                android:textSize="13sp"
-                android:fontFamily="sans-serif-medium"
-                android:letterSpacing="0.02"
-                app:cornerRadius="20dp" />
+                android:letterSpacing="0.04" />
 
         </LinearLayout>
+
+        <!-- Stop button at bottom center -->
+        <FrameLayout
+            android:layout_width="64dp"
+            android:layout_height="64dp"
+            android:layout_gravity="center|bottom"
+            android:layout_marginBottom="48dp"
+            android:background="@drawable/stop_button_circle">
+
+            <ImageButton
+                android:id="@+id/btn_stop_recording"
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:src="@drawable/ic_stop"
+                android:scaleType="centerInside"
+                android:padding="20dp"
+                android:contentDescription="Stop recording" />
+        </FrameLayout>
+
     </FrameLayout>
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>

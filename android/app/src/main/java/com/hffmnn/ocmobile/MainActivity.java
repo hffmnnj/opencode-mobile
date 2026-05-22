@@ -24,6 +24,8 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.SeekBar;
@@ -43,9 +45,11 @@ import java.net.URL;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-import org.vosk.Model;
-import org.vosk.Recognizer;
-import org.vosk.android.StorageService;
+import ai.moonshine.voice.JNI;
+import ai.moonshine.voice.Transcriber;
+import ai.moonshine.voice.Transcript;
+import ai.moonshine.voice.TranscriptEvent;
+import ai.moonshine.voice.TranscriptEventListener;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -100,23 +104,26 @@ public class MainActivity extends AppCompatActivity {
     private ProgressBar progressBar;
     private LinearLayout errorView;
     private TextView errorText;
-    private MaterialButton btnSettingsFab;
+    private ImageButton btnSettingsFab;
     private MaterialButton btnRetry;
     private MaterialButton btnSettings;
 
     // Voice input UI
-    private MaterialButton btnMicFab;
+    private ImageButton btnMicFab;
     private FrameLayout recordingOverlay;
     private TextView recordingStatus;
     private TextView recordingTimer;
-    private MaterialButton btnStopRecording;
+    private ImageButton btnStopRecording;
     private View pulseRing1;
     private View pulseRing2;
     private android.animation.ObjectAnimator pulseAnim1;
     private android.animation.ObjectAnimator pulseAnim2;
 
     // Voice input state
-    private boolean isRecording = false;
+    private volatile boolean isRecording = false;
+    private volatile boolean isTranscribing = false;
+    private String lastInjectedText = "";
+    private long lastInjectedTime = 0;
     private AudioRecord audioRecord;
     private Thread recordingThread;
     private File recordingFile;
@@ -124,12 +131,11 @@ public class MainActivity extends AppCompatActivity {
     private long recordingStartTime;
     private Runnable timerRunnable;
 
-    // Vosk STT
-    private Model voskModel;
-    private Recognizer voskRecognizer;
-    private boolean voskModelReady = false;
-    private static final String VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip";
-    private static final String VOSK_MODEL_DIR = "vosk-model-small-en-us-0.15";
+    // Moonshine STT
+    private Transcriber moonshineTranscriber;
+    private boolean moonshineModelReady = false;
+    private static final String MOONSHINE_MODEL_PATH = "base-en";
+    private static final int MOONSHINE_MODEL_ARCH = JNI.MOONSHINE_MODEL_ARCH_BASE;
 
     private ValueCallback<Uri[]> filePathCallback;
     private ActivityResultLauncher<Intent> filePickerLauncher;
@@ -348,8 +354,8 @@ public class MainActivity extends AppCompatActivity {
         btnSettingsFab.setOnClickListener(v -> showSettingsDialog());
         btnStopRecording.setOnClickListener(v -> stopRecordingAndTranscribe());
 
-        // Initialize Vosk model in background
-        initVoskModel();
+        // Initialize Moonshine model in background
+        initMoonshineModel();
 
         requestMediaPermissions();
         applyZoom();
@@ -667,32 +673,24 @@ public class MainActivity extends AppCompatActivity {
         if (audioRecord != null) {
             audioRecord.release();
         }
-        if (voskRecognizer != null) {
-            voskRecognizer.close();
-        }
-        if (voskModel != null) {
-            voskModel.close();
+        if (moonshineTranscriber != null) {
+            // Transcriber auto-frees in finalize()
         }
     }
 
     // ==================== VOICE INPUT ====================
 
-    private void initVoskModel() {
-        File modelDir = new File(getFilesDir(), VOSK_MODEL_DIR);
-        if (modelDir.exists() && modelDir.isDirectory()) {
-            Log.d(TAG, "Vosk model found at " + modelDir.getAbsolutePath());
-            executor.execute(() -> {
-                try {
-                    voskModel = new Model(modelDir.getAbsolutePath());
-                    voskModelReady = true;
-                    Log.d(TAG, "Vosk model loaded successfully");
-                } catch (Exception e) {
-                    Log.e(TAG, "Failed to load Vosk model: " + e.getMessage(), e);
-                }
-            });
-        } else {
-            Log.d(TAG, "Vosk model not found. Will download on first use.");
-        }
+    private void initMoonshineModel() {
+        executor.execute(() -> {
+            try {
+                moonshineTranscriber = new Transcriber();
+                moonshineTranscriber.loadFromAssets(MainActivity.this, MOONSHINE_MODEL_PATH, MOONSHINE_MODEL_ARCH);
+                moonshineModelReady = true;
+                Log.d(TAG, "Moonshine model loaded successfully");
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to load Moonshine model: " + e.getMessage(), e);
+            }
+        });
     }
 
     private void onMicButtonClicked() {
@@ -709,12 +707,10 @@ public class MainActivity extends AppCompatActivity {
         }
 
         // Check model ready
-        if (!voskModelReady) {
-            // Model not ready yet — try to download it now
-            recordingStatus.setText("Downloading voice model...");
+        if (!moonshineModelReady) {
+            recordingStatus.setText("Loading voice model...");
             recordingOverlay.setVisibility(View.VISIBLE);
             btnMicFab.setEnabled(false);
-            downloadVoskModel();
             return;
         }
 
@@ -759,23 +755,22 @@ public class MainActivity extends AppCompatActivity {
         audioRecord.startRecording();
 
         recordingThread = new Thread(() -> {
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            java.util.ArrayList<Short> shortBuffer = new java.util.ArrayList<>();
             short[] buffer = new short[bufferSize];
             while (isRecording) {
                 int read = audioRecord.read(buffer, 0, buffer.length);
                 if (read > 0) {
-                    // Convert shorts to little-endian bytes
-                    ByteBuffer byteBuffer = ByteBuffer.allocate(read * 2);
-                    byteBuffer.order(ByteOrder.LITTLE_ENDIAN);
                     for (int i = 0; i < read; i++) {
-                        byteBuffer.putShort(buffer[i]);
+                        shortBuffer.add(buffer[i]);
                     }
-                    baos.write(byteBuffer.array(), 0, read * 2);
                 }
             }
-            // Store recorded bytes for transcription
-            final byte[] audioBytes = baos.toByteArray();
-            mainHandler.post(() -> runTranscription(audioBytes));
+            // Convert shorts to float[] for Moonshine
+            final float[] audioFloats = new float[shortBuffer.size()];
+            for (int i = 0; i < shortBuffer.size(); i++) {
+                audioFloats[i] = shortBuffer.get(i) / 32768.0f;
+            }
+            mainHandler.post(() -> runTranscription(audioFloats));
         });
         recordingThread.start();
     }
@@ -796,11 +791,16 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void runTranscription(byte[] audioBytes) {
-        if (audioBytes == null || audioBytes.length == 0) {
+    private void runTranscription(float[] audioFloats) {
+        if (audioFloats == null || audioFloats.length == 0) {
             Log.w(TAG, "No audio recorded");
             return;
         }
+        if (isTranscribing) {
+            Log.w(TAG, "Transcription already in progress, ignoring duplicate call");
+            return;
+        }
+        isTranscribing = true;
 
         recordingStatus.setText("Transcribing...");
         recordingOverlay.setVisibility(View.VISIBLE);
@@ -816,40 +816,47 @@ public class MainActivity extends AppCompatActivity {
             // Try Whisper API first if key is available
             if (!openaiKey.isEmpty()) {
                 try {
-                    text = transcribeWithWhisper(audioBytes, openaiKey);
+                    // Convert float[] back to PCM bytes for Whisper API
+                    byte[] pcmBytes = floatsToPcmBytes(audioFloats);
+                    text = transcribeWithWhisper(pcmBytes, openaiKey);
                     Log.d(TAG, "Whisper transcription: " + text);
                 } catch (Exception e) {
                     error = e.getMessage();
-                    Log.w(TAG, "Whisper API failed, falling back to Vosk: " + error);
+                    Log.w(TAG, "Whisper API failed, falling back to Moonshine: " + error);
                 }
             }
 
-            // Fall back to Vosk if Whisper failed or no key
+            // Fall back to Moonshine if Whisper failed or no key
             if (text == null || text.isEmpty()) {
                 try {
-                    if (voskRecognizer == null) {
-                        voskRecognizer = new Recognizer(voskModel, 16000.0f);
-                    } else {
-                        voskRecognizer.reset();
+                    Transcript transcript = moonshineTranscriber.transcribeWithoutStreaming(audioFloats, 16000);
+                    if (transcript != null && transcript.lines != null && !transcript.lines.isEmpty()) {
+                        StringBuilder sb = new StringBuilder();
+                        for (ai.moonshine.voice.TranscriptLine line : transcript.lines) {
+                            if (line.text != null && !line.text.isEmpty()) {
+                                if (sb.length() > 0) sb.append(" ");
+                                sb.append(line.text);
+                            }
+                        }
+                        text = sb.toString().trim();
                     }
-                    voskRecognizer.acceptWaveForm(audioBytes, audioBytes.length);
-                    String resultJson = voskRecognizer.getResult();
-                    Log.d(TAG, "Vosk raw result: " + resultJson);
-                    text = extractVoskText(resultJson);
+                    Log.d(TAG, "Moonshine transcription: " + text);
                 } catch (Exception e) {
                     error = e.getMessage();
-                    Log.e(TAG, "Vosk transcription failed: " + error, e);
+                    Log.e(TAG, "Moonshine transcription failed: " + error, e);
                 }
             }
 
             final String finalText = text;
             final String finalError = error;
             mainHandler.post(() -> {
+                isTranscribing = false;
                 recordingOverlay.setVisibility(View.GONE);
                 btnMicFab.setEnabled(true);
                 if (finalText != null && !finalText.isEmpty()) {
-                    Log.d(TAG, "Final transcription: " + finalText);
-                    injectTextIntoPrompt(finalText);
+                    String deduped = deduplicateRepeatedWords(finalText);
+                    Log.d(TAG, "Final transcription: " + finalText + " (deduped: " + deduped + ")");
+                    injectTextIntoPrompt(deduped);
                 } else {
                     Log.w(TAG, "Transcription empty. Error: " + finalError);
                 }
@@ -857,18 +864,16 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    private String extractVoskText(String json) {
-        if (json == null) return "";
-        // Simple JSON parsing without external dependency
-        int textIndex = json.indexOf("\"text\"");
-        if (textIndex < 0) return "";
-        int colonIndex = json.indexOf(':', textIndex);
-        if (colonIndex < 0) return "";
-        int startQuote = json.indexOf('"', colonIndex + 1);
-        if (startQuote < 0) return "";
-        int endQuote = json.indexOf('"', startQuote + 1);
-        if (endQuote < 0) return "";
-        return json.substring(startQuote + 1, endQuote);
+    private byte[] floatsToPcmBytes(float[] audioFloats) {
+        short[] shorts = new short[audioFloats.length];
+        for (int i = 0; i < audioFloats.length; i++) {
+            float clamped = Math.max(-1.0f, Math.min(1.0f, audioFloats[i]));
+            shorts[i] = (short) (clamped * 32767.0f);
+        }
+        ByteBuffer buf = ByteBuffer.allocate(shorts.length * 2);
+        buf.order(ByteOrder.LITTLE_ENDIAN);
+        for (short s : shorts) buf.putShort(s);
+        return buf.array();
     }
 
     // ==================== WHISPER API ====================
@@ -969,8 +974,40 @@ public class MainActivity extends AppCompatActivity {
         arr[offset + 1] = (byte) ((value >> 8) & 0xFF);
     }
 
+    private String deduplicateRepeatedWords(String text) {
+        if (text == null || text.isEmpty()) return text;
+        String[] words = text.trim().split("\\s+");
+        if (words.length < 3) return text;
+        StringBuilder sb = new StringBuilder();
+        sb.append(words[0]);
+        int repeatCount = 1;
+        for (int i = 1; i < words.length; i++) {
+            if (words[i].equalsIgnoreCase(words[i - 1])) {
+                repeatCount++;
+                // Allow up to 2 consecutive identical words, collapse beyond that
+                if (repeatCount <= 2) {
+                    sb.append(" ").append(words[i]);
+                }
+            } else {
+                repeatCount = 1;
+                sb.append(" ").append(words[i]);
+            }
+        }
+        return sb.toString();
+    }
+
     private void injectTextIntoPrompt(String text) {
         if (webView == null || webView.getUrl() == null) return;
+        if (text == null || text.isEmpty()) return;
+
+        // Debounce: don't inject the exact same text within 2 seconds
+        long now = System.currentTimeMillis();
+        if (text.equals(lastInjectedText) && (now - lastInjectedTime) < 2000) {
+            Log.w(TAG, "Duplicate injection suppressed: " + text);
+            return;
+        }
+        lastInjectedText = text;
+        lastInjectedTime = now;
 
         // Escape the text for JavaScript string literal
         String escaped = text.replace("\\", "\\\\")
@@ -1004,7 +1041,14 @@ public class MainActivity extends AppCompatActivity {
             "    var end = el.selectionEnd || el.value.length;" +
             "    var before = el.value.substring(0,start);" +
             "    var after = el.value.substring(end);" +
-            "    el.value = before + text + after;" +
+            "    // Avoid injecting duplicate text if it already exists at cursor" +
+            "    if (before.endsWith(text) || el.value.indexOf(text) !== -1) {" +
+            "      return 'already-present';" +
+            "    }" +
+            "    var newVal = before + text + after;" +
+            "    // Use native setter for React compatibility" +
+            "    var nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype || window.HTMLInputElement.prototype, 'value').set;" +
+            "    if (nativeInputValueSetter) { nativeInputValueSetter.call(el, newVal); } else { el.value = newVal; }" +
             "    el.selectionStart = el.selectionEnd = start + text.length;" +
             "    el.scrollTop = el.scrollHeight;" +
             "    var ev = new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text });" +
@@ -1031,58 +1075,9 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    private void downloadVoskModel() {
-        executor.execute(() -> {
-            try {
-                File modelZip = new File(getCacheDir(), "vosk-model.zip");
-                File modelDir = new File(getFilesDir(), VOSK_MODEL_DIR);
-
-                // Download
-                Log.d(TAG, "Downloading Vosk model from " + VOSK_MODEL_URL);
-                HttpURLConnection conn = (HttpURLConnection) new URL(VOSK_MODEL_URL).openConnection();
-                conn.setConnectTimeout(30000);
-                conn.setReadTimeout(60000);
-                conn.setInstanceFollowRedirects(true);
-                try (InputStream in = conn.getInputStream();
-                     FileOutputStream out = new FileOutputStream(modelZip)) {
-                    byte[] buf = new byte[8192];
-                    int read;
-                    long total = 0;
-                    while ((read = in.read(buf)) != -1) {
-                        out.write(buf, 0, read);
-                        total += read;
-                        if (total % (1024 * 1024) == 0) {
-                            Log.d(TAG, "Downloaded " + (total / 1024 / 1024) + " MB");
-                        }
-                    }
-                }
-                conn.disconnect();
-                Log.d(TAG, "Model download complete: " + modelZip.length() + " bytes");
-
-                // Unzip
-                Log.d(TAG, "Unpacking model to " + modelDir.getAbsolutePath());
-                unzip(modelZip, modelDir.getParentFile());
-                modelZip.delete();
-
-                // Load model
-                voskModel = new Model(modelDir.getAbsolutePath());
-                voskModelReady = true;
-                Log.d(TAG, "Vosk model ready");
-
-                mainHandler.post(() -> {
-                    recordingOverlay.setVisibility(View.GONE);
-                    btnMicFab.setEnabled(true);
-                    startRecording();
-                });
-            } catch (Exception e) {
-                Log.e(TAG, "Model download failed: " + e.getMessage(), e);
-                mainHandler.post(() -> {
-                    recordingOverlay.setVisibility(View.GONE);
-                    btnMicFab.setEnabled(true);
-                    showError("Voice model download failed: " + e.getMessage());
-                });
-            }
-        });
+    private String formatTimer(long ms) {
+        long sec = ms / 1000;
+        return String.format(java.util.Locale.US, "%d:%02d", sec / 60, sec % 60);
     }
 
     private void unzip(File zipFile, File targetDir) throws Exception {
@@ -1105,13 +1100,6 @@ public class MainActivity extends AppCompatActivity {
                 zis.closeEntry();
             }
         }
-    }
-
-    private String formatTimer(long ms) {
-        long seconds = ms / 1000;
-        long minutes = seconds / 60;
-        seconds = seconds % 60;
-        return minutes + ":" + (seconds < 10 ? "0" : "") + seconds;
     }
 
     // ==================== PULSE ANIMATION ====================
