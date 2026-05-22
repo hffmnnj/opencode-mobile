@@ -43,6 +43,24 @@ import java.net.URL;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import org.vosk.Model;
+import org.vosk.Recognizer;
+import org.vosk.android.StorageService;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.ByteArrayOutputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+import android.media.AudioFormat;
+import android.media.AudioRecord;
+import android.media.MediaRecorder;
+import android.widget.FrameLayout;
+
 public class MainActivity extends AppCompatActivity {
 
     public static class ClipboardBridge {
@@ -84,6 +102,29 @@ public class MainActivity extends AppCompatActivity {
     private MaterialButton btnSettingsFab;
     private MaterialButton btnRetry;
     private MaterialButton btnSettings;
+
+    // Voice input UI
+    private MaterialButton btnMicFab;
+    private FrameLayout recordingOverlay;
+    private TextView recordingStatus;
+    private TextView recordingTimer;
+    private MaterialButton btnStopRecording;
+
+    // Voice input state
+    private boolean isRecording = false;
+    private AudioRecord audioRecord;
+    private Thread recordingThread;
+    private File recordingFile;
+    private final Handler timerHandler = new Handler(Looper.getMainLooper());
+    private long recordingStartTime;
+    private Runnable timerRunnable;
+
+    // Vosk STT
+    private Model voskModel;
+    private Recognizer voskRecognizer;
+    private boolean voskModelReady = false;
+    private static final String VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip";
+    private static final String VOSK_MODEL_DIR = "vosk-model-small-en-us-0.15";
 
     private ValueCallback<Uri[]> filePathCallback;
     private ActivityResultLauncher<Intent> filePickerLauncher;
@@ -287,6 +328,19 @@ public class MainActivity extends AppCompatActivity {
         btnSettings.setOnClickListener(v -> showSettingsDialog());
         btnSettingsFab.setOnClickListener(v -> showSettingsDialog());
 
+        // Voice input UI
+        btnMicFab = findViewById(R.id.btn_mic_fab);
+        recordingOverlay = findViewById(R.id.recording_overlay);
+        recordingStatus = findViewById(R.id.recording_status);
+        recordingTimer = findViewById(R.id.recording_timer);
+        btnStopRecording = findViewById(R.id.btn_stop_recording);
+
+        btnMicFab.setOnClickListener(v -> onMicButtonClicked());
+        btnStopRecording.setOnClickListener(v -> stopRecordingAndTranscribe());
+
+        // Initialize Vosk model in background
+        initVoskModel();
+
         requestMediaPermissions();
         applyZoom();
         connect();
@@ -298,12 +352,14 @@ public class MainActivity extends AppCompatActivity {
             perms = new String[]{
                 android.Manifest.permission.READ_MEDIA_IMAGES,
                 android.Manifest.permission.READ_MEDIA_VIDEO,
-                android.Manifest.permission.CAMERA
+                android.Manifest.permission.CAMERA,
+                android.Manifest.permission.RECORD_AUDIO
             };
         } else {
             perms = new String[]{
                 android.Manifest.permission.READ_EXTERNAL_STORAGE,
-                android.Manifest.permission.CAMERA
+                android.Manifest.permission.CAMERA,
+                android.Manifest.permission.RECORD_AUDIO
             };
         }
 
@@ -591,5 +647,311 @@ public class MainActivity extends AppCompatActivity {
     protected void onDestroy() {
         super.onDestroy();
         executor.shutdown();
+        if (audioRecord != null) {
+            audioRecord.release();
+        }
+        if (voskRecognizer != null) {
+            voskRecognizer.close();
+        }
+        if (voskModel != null) {
+            voskModel.close();
+        }
+    }
+
+    // ==================== VOICE INPUT ====================
+
+    private void initVoskModel() {
+        File modelDir = new File(getFilesDir(), VOSK_MODEL_DIR);
+        if (modelDir.exists() && modelDir.isDirectory()) {
+            Log.d(TAG, "Vosk model found at " + modelDir.getAbsolutePath());
+            executor.execute(() -> {
+                try {
+                    voskModel = new Model(modelDir.getAbsolutePath());
+                    voskModelReady = true;
+                    Log.d(TAG, "Vosk model loaded successfully");
+                } catch (Exception e) {
+                    Log.e(TAG, "Failed to load Vosk model: " + e.getMessage(), e);
+                }
+            });
+        } else {
+            Log.d(TAG, "Vosk model not found. Will download on first use.");
+        }
+    }
+
+    private void onMicButtonClicked() {
+        if (isRecording) {
+            stopRecordingAndTranscribe();
+            return;
+        }
+
+        // Check audio permission
+        if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.RECORD_AUDIO}, PERM_REQUEST);
+            return;
+        }
+
+        // Check model ready
+        if (!voskModelReady) {
+            // Model not ready yet — try to download it now
+            recordingStatus.setText("Downloading voice model...");
+            recordingOverlay.setVisibility(View.VISIBLE);
+            btnMicFab.setEnabled(false);
+            downloadVoskModel();
+            return;
+        }
+
+        startRecording();
+    }
+
+    private void startRecording() {
+        isRecording = true;
+        recordingOverlay.setVisibility(View.VISIBLE);
+        recordingStatus.setText("Listening...");
+        btnMicFab.setEnabled(false);
+
+        // Start timer
+        recordingStartTime = System.currentTimeMillis();
+        timerRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (!isRecording) return;
+                long elapsed = System.currentTimeMillis() - recordingStartTime;
+                recordingTimer.setText(formatTimer(elapsed));
+                timerHandler.postDelayed(this, 500);
+            }
+        };
+        timerHandler.post(timerRunnable);
+
+        // Audio config: 16kHz, mono, 16-bit PCM
+        final int sampleRate = 16000;
+        final int channelConfig = AudioFormat.CHANNEL_IN_MONO;
+        final int audioFormat = AudioFormat.ENCODING_PCM_16BIT;
+        final int bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat);
+
+        audioRecord = new AudioRecord(MediaRecorder.AudioSource.MIC,
+                sampleRate, channelConfig, audioFormat, bufferSize);
+
+        if (audioRecord.getState() != AudioRecord.STATE_INITIALIZED) {
+            Log.e(TAG, "AudioRecord failed to initialize");
+            stopRecordingAndTranscribe();
+            return;
+        }
+
+        audioRecord.startRecording();
+
+        recordingThread = new Thread(() -> {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            short[] buffer = new short[bufferSize];
+            while (isRecording) {
+                int read = audioRecord.read(buffer, 0, buffer.length);
+                if (read > 0) {
+                    // Convert shorts to little-endian bytes
+                    ByteBuffer byteBuffer = ByteBuffer.allocate(read * 2);
+                    byteBuffer.order(ByteOrder.LITTLE_ENDIAN);
+                    for (int i = 0; i < read; i++) {
+                        byteBuffer.putShort(buffer[i]);
+                    }
+                    baos.write(byteBuffer.array(), 0, read * 2);
+                }
+            }
+            // Store recorded bytes for transcription
+            final byte[] audioBytes = baos.toByteArray();
+            mainHandler.post(() -> runTranscription(audioBytes));
+        });
+        recordingThread.start();
+    }
+
+    private void stopRecordingAndTranscribe() {
+        if (!isRecording) return;
+        isRecording = false;
+        timerHandler.removeCallbacks(timerRunnable);
+        recordingOverlay.setVisibility(View.GONE);
+        recordingStatus.setText("Listening...");
+        btnMicFab.setEnabled(true);
+
+        if (audioRecord != null) {
+            audioRecord.stop();
+            audioRecord.release();
+            audioRecord = null;
+        }
+    }
+
+    private void runTranscription(byte[] audioBytes) {
+        if (audioBytes == null || audioBytes.length == 0) {
+            Log.w(TAG, "No audio recorded");
+            return;
+        }
+
+        recordingStatus.setText("Transcribing...");
+        recordingOverlay.setVisibility(View.VISIBLE);
+        btnMicFab.setEnabled(false);
+
+        executor.execute(() -> {
+            try {
+                if (voskRecognizer == null) {
+                    voskRecognizer = new Recognizer(voskModel, 16000.0f);
+                } else {
+                    voskRecognizer.reset();
+                }
+
+                voskRecognizer.acceptWaveForm(audioBytes, audioBytes.length);
+                String resultJson = voskRecognizer.getResult();
+                Log.d(TAG, "Vosk raw result: " + resultJson);
+
+                // Parse JSON result: {"text": "hello world"}
+                String text = extractVoskText(resultJson);
+
+                mainHandler.post(() -> {
+                    recordingOverlay.setVisibility(View.GONE);
+                    btnMicFab.setEnabled(true);
+                    if (text != null && !text.isEmpty()) {
+                        Log.d(TAG, "Transcribed: " + text);
+                        injectTextIntoPrompt(text);
+                    } else {
+                        Log.w(TAG, "Transcription empty");
+                    }
+                });
+            } catch (Exception e) {
+                Log.e(TAG, "Transcription failed: " + e.getMessage(), e);
+                mainHandler.post(() -> {
+                    recordingOverlay.setVisibility(View.GONE);
+                    btnMicFab.setEnabled(true);
+                });
+            }
+        });
+    }
+
+    private String extractVoskText(String json) {
+        if (json == null) return "";
+        // Simple JSON parsing without external dependency
+        int textIndex = json.indexOf("\"text\"");
+        if (textIndex < 0) return "";
+        int colonIndex = json.indexOf(':', textIndex);
+        if (colonIndex < 0) return "";
+        int startQuote = json.indexOf('"', colonIndex + 1);
+        if (startQuote < 0) return "";
+        int endQuote = json.indexOf('"', startQuote + 1);
+        if (endQuote < 0) return "";
+        return json.substring(startQuote + 1, endQuote);
+    }
+
+    private void injectTextIntoPrompt(String text) {
+        if (webView == null || webView.getUrl() == null) return;
+
+        // Escape the text for JavaScript string literal
+        String escaped = text.replace("\\", "\\\\")
+                .replace("'", "\\'")
+                .replace("\"", "\\\"")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r");
+
+        String script =
+            "(function(text){" +
+            "  var el = document.activeElement;" +
+            "  if (!el || !((el.tagName==='TEXTAREA') || (el.tagName==='INPUT') || el.isContentEditable)) {" +
+            "    el = document.querySelector('textarea, [contenteditable=\"true\"], input[type=\"text\"]');" +
+            "  }" +
+            "  if (!el) return 'no-input-found';" +
+            "  if (el.tagName==='TEXTAREA' || el.tagName==='INPUT') {" +
+            "    var start = el.selectionStart || el.value.length;" +
+            "    var end = el.selectionEnd || el.value.length;" +
+            "    el.value = el.value.substring(0,start) + text + el.value.substring(end);" +
+            "    el.selectionStart = el.selectionEnd = start + text.length;" +
+            "  } else if (el.isContentEditable) {" +
+            "    document.execCommand('insertText', false, text);" +
+            "  }" +
+            "  el.dispatchEvent(new Event('input',{bubbles:true}));" +
+            "  el.dispatchEvent(new Event('change',{bubbles:true}));" +
+            "  el.focus();" +
+            "  return 'injected';" +
+            "})('" + escaped + "')";
+
+        webView.evaluateJavascript(script, value -> {
+            Log.d(TAG, "Text injection result: " + value);
+        });
+    }
+
+    private void downloadVoskModel() {
+        executor.execute(() -> {
+            try {
+                File modelZip = new File(getCacheDir(), "vosk-model.zip");
+                File modelDir = new File(getFilesDir(), VOSK_MODEL_DIR);
+
+                // Download
+                Log.d(TAG, "Downloading Vosk model from " + VOSK_MODEL_URL);
+                HttpURLConnection conn = (HttpURLConnection) new URL(VOSK_MODEL_URL).openConnection();
+                conn.setConnectTimeout(30000);
+                conn.setReadTimeout(60000);
+                conn.setInstanceFollowRedirects(true);
+                try (InputStream in = conn.getInputStream();
+                     FileOutputStream out = new FileOutputStream(modelZip)) {
+                    byte[] buf = new byte[8192];
+                    int read;
+                    long total = 0;
+                    while ((read = in.read(buf)) != -1) {
+                        out.write(buf, 0, read);
+                        total += read;
+                        if (total % (1024 * 1024) == 0) {
+                            Log.d(TAG, "Downloaded " + (total / 1024 / 1024) + " MB");
+                        }
+                    }
+                }
+                conn.disconnect();
+                Log.d(TAG, "Model download complete: " + modelZip.length() + " bytes");
+
+                // Unzip
+                Log.d(TAG, "Unpacking model to " + modelDir.getAbsolutePath());
+                unzip(modelZip, modelDir.getParentFile());
+                modelZip.delete();
+
+                // Load model
+                voskModel = new Model(modelDir.getAbsolutePath());
+                voskModelReady = true;
+                Log.d(TAG, "Vosk model ready");
+
+                mainHandler.post(() -> {
+                    recordingOverlay.setVisibility(View.GONE);
+                    btnMicFab.setEnabled(true);
+                    startRecording();
+                });
+            } catch (Exception e) {
+                Log.e(TAG, "Model download failed: " + e.getMessage(), e);
+                mainHandler.post(() -> {
+                    recordingOverlay.setVisibility(View.GONE);
+                    btnMicFab.setEnabled(true);
+                    showError("Voice model download failed: " + e.getMessage());
+                });
+            }
+        });
+    }
+
+    private void unzip(File zipFile, File targetDir) throws Exception {
+        try (ZipInputStream zis = new ZipInputStream(zipFile.toURI().toURL().openStream())) {
+            ZipEntry entry;
+            while ((entry = zis.getNextEntry()) != null) {
+                File outFile = new File(targetDir, entry.getName());
+                if (entry.isDirectory()) {
+                    outFile.mkdirs();
+                } else {
+                    outFile.getParentFile().mkdirs();
+                    try (FileOutputStream fos = new FileOutputStream(outFile)) {
+                        byte[] buf = new byte[4096];
+                        int read;
+                        while ((read = zis.read(buf)) != -1) {
+                            fos.write(buf, 0, read);
+                        }
+                    }
+                }
+                zis.closeEntry();
+            }
+        }
+    }
+
+    private String formatTimer(long ms) {
+        long seconds = ms / 1000;
+        long minutes = seconds / 60;
+        seconds = seconds % 60;
+        return minutes + ":" + (seconds < 10 ? "0" : "") + seconds;
     }
 }

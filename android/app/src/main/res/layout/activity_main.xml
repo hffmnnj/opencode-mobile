@@ -80,6 +80,7 @@
         android:layout_height="32dp"
         android:layout_gravity="bottom|end"
         android:layout_margin="16dp"
+        android:layout_marginBottom="88dp"
         android:insetTop="0dp"
         android:insetBottom="0dp"
         android:insetLeft="0dp"
@@ -92,5 +93,73 @@
         android:textSize="14sp"
         app:backgroundTint="@color/dark_gray"
         app:cornerRadius="16dp" />
+
+    <!-- Voice Input FAB -->
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btn_mic_fab"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="16dp"
+        android:insetTop="0dp"
+        android:insetBottom="0dp"
+        android:insetLeft="0dp"
+        android:insetRight="0dp"
+        android:minWidth="0dp"
+        android:minHeight="0dp"
+        android:padding="0dp"
+        android:text="🎤"
+        android:textColor="@color/white"
+        android:textSize="24sp"
+        app:backgroundTint="@color/accent"
+        app:cornerRadius="28dp" />
+
+    <!-- Recording Overlay -->
+    <FrameLayout
+        android:id="@+id/recording_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#CC000000"
+        android:visibility="gone"
+        android:clickable="true"
+        android:focusable="true">
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:orientation="vertical"
+            android:gravity="center">
+
+            <TextView
+                android:id="@+id/recording_status"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Listening..."
+                android:textColor="@color/white"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/recording_timer"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="0:00"
+                android:textColor="@color/gray"
+                android:textSize="14sp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_stop_recording"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:backgroundTint="#ff4444"
+                android:text="Stop"
+                android:textColor="@color/white"
+                app:cornerRadius="8dp" />
+
+        </LinearLayout>
+    </FrameLayout>
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>
