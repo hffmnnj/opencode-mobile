@@ -65,6 +65,13 @@ import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.widget.FrameLayout;
 
+import androidx.coordinatorlayout.widget.CoordinatorLayout;
+
+import android.graphics.Rect;
+import android.view.HapticFeedbackConstants;
+import android.view.MotionEvent;
+import android.view.ViewConfiguration;
+
 public class MainActivity extends AppCompatActivity {
 
     public static class ClipboardBridge {
@@ -96,9 +103,14 @@ public class MainActivity extends AppCompatActivity {
     private static final String KEY_PASS = "password";
     private static final String KEY_OPENAI = "openai_key";
     private static final String KEY_ZOOM = "zoom_level";
+    private static final String KEY_PILL_X = "pill_x";
+    private static final String KEY_PILL_Y = "pill_y";
+    private static final String KEY_PILL_VERSION = "pill_version";
     private static final String DEFAULT_URL = "http://localhost:4096";
     private static final int DEFAULT_ZOOM = 100;
     private static final int PERM_REQUEST = 1;
+    private static final long LONG_PRESS_DURATION_MS = 300;
+    private static final float DRAG_THRESHOLD_DP = 8f;
 
     private WebView webView;
     private ProgressBar progressBar;
@@ -118,6 +130,8 @@ public class MainActivity extends AppCompatActivity {
     private View pulseRing2;
     private android.animation.ObjectAnimator pulseAnim1;
     private android.animation.ObjectAnimator pulseAnim2;
+
+    private LinearLayout fabPill;
 
     // Voice input state
     private volatile boolean isRecording = false;
@@ -146,6 +160,14 @@ public class MainActivity extends AppCompatActivity {
     private long pauseTimestamp = 0;
     private final int[] domHashAtPause = new int[1];
     private int resumeGeneration = 0;
+
+    // Pill drag state
+    private final Handler dragHandler = new Handler(Looper.getMainLooper());
+    private Runnable longPressRunnable;
+    private boolean isDraggingPill = false;
+    private boolean longPressTriggered = false;
+    private float dragStartRawX, dragStartRawY;
+    private float dragThresholdPx;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -353,6 +375,11 @@ public class MainActivity extends AppCompatActivity {
         btnMicFab.setOnClickListener(v -> onMicButtonClicked());
         btnSettingsFab.setOnClickListener(v -> showSettingsDialog());
         btnStopRecording.setOnClickListener(v -> stopRecordingAndTranscribe());
+
+        fabPill = findViewById(R.id.fab_pill);
+        dragThresholdPx = DRAG_THRESHOLD_DP * getResources().getDisplayMetrics().density;
+        setupDraggablePill();
+        restorePillPosition();
 
         // Initialize Moonshine model in background
         initMoonshineModel();
@@ -1091,6 +1118,176 @@ public class MainActivity extends AppCompatActivity {
                 zis.closeEntry();
             }
         }
+    }
+
+    // ==================== DRAGGABLE FAB PILL ====================
+
+    private void setupDraggablePill() {
+        View.OnTouchListener dragListener = (v, event) -> {
+            // The pill is always what moves, regardless of which child view started the touch
+            View pill = fabPill;
+
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    convertPillGravityToMargins();
+
+                    isDraggingPill = false;
+                    longPressTriggered = false;
+                    dragStartRawX = event.getRawX();
+                    dragStartRawY = event.getRawY();
+
+                    if (longPressRunnable != null) dragHandler.removeCallbacks(longPressRunnable);
+                    longPressRunnable = () -> {
+                        longPressTriggered = true;
+                        isDraggingPill = true;
+                        pill.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+                    };
+                    dragHandler.postDelayed(longPressRunnable, LONG_PRESS_DURATION_MS);
+                    return true;
+
+                case MotionEvent.ACTION_MOVE:
+                    float dxRaw = event.getRawX() - dragStartRawX;
+                    float dyRaw = event.getRawY() - dragStartRawY;
+
+                    if (!longPressTriggered && !isDraggingPill) {
+                        if (Math.abs(dxRaw) > dragThresholdPx || Math.abs(dyRaw) > dragThresholdPx) {
+                            if (longPressRunnable != null) dragHandler.removeCallbacks(longPressRunnable);
+                            longPressRunnable = null;
+                        }
+                    }
+
+                    if (isDraggingPill) {
+                        pill.setTranslationX(dxRaw);
+                        pill.setTranslationY(dyRaw);
+                    }
+                    return true;
+
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    if (longPressRunnable != null) {
+                        dragHandler.removeCallbacks(longPressRunnable);
+                        longPressRunnable = null;
+                    }
+
+                    if (isDraggingPill) {
+                        CoordinatorLayout.LayoutParams params = (CoordinatorLayout.LayoutParams) pill.getLayoutParams();
+                        int pillW = pill.getWidth();
+                        int pillH = pill.getHeight();
+
+                        int newMarginStart = params.getMarginStart() + (int) pill.getTranslationX();
+                        int newMarginTop = params.topMargin + (int) pill.getTranslationY();
+                        pill.setTranslationX(0f);
+                        pill.setTranslationY(0f);
+
+                        // Clamp to parent bounds
+                        View parent = (View) pill.getParent();
+                        int maxStart = Math.max(0, parent.getWidth() - pillW);
+                        int maxTop = Math.max(0, parent.getHeight() - pillH);
+                        newMarginStart = Math.max(0, Math.min(newMarginStart, maxStart));
+                        newMarginTop = Math.max(0, Math.min(newMarginTop, maxTop));
+
+                        params.setMarginStart(newMarginStart);
+                        params.topMargin = newMarginTop;
+                        pill.setLayoutParams(params);
+
+                        savePillPosition(newMarginStart, newMarginTop);
+                        isDraggingPill = false;
+                        longPressTriggered = false;
+                    } else {
+                        // Short tap: trigger click on whichever view was touched
+                        v.performClick();
+                    }
+                    return true;
+            }
+            return true;
+        };
+
+        fabPill.setOnTouchListener(dragListener);
+        btnMicFab.setOnTouchListener(dragListener);
+        btnSettingsFab.setOnTouchListener(dragListener);
+    }
+
+    private boolean pillGravityConverted = false;
+
+    private void convertPillGravityToMargins() {
+        if (pillGravityConverted) return;
+        CoordinatorLayout.LayoutParams params = (CoordinatorLayout.LayoutParams) fabPill.getLayoutParams();
+        int gravity = params.gravity;
+        if (gravity == (android.view.Gravity.TOP | android.view.Gravity.START)) return;
+
+        // Gravity-based position is already laid out; capture visual position
+        int visualLeft = fabPill.getLeft();
+        int visualTop = fabPill.getTop();
+
+        params.gravity = android.view.Gravity.TOP | android.view.Gravity.START;
+        params.setMarginStart(visualLeft);
+        params.topMargin = visualTop;
+        fabPill.setLayoutParams(params);
+        pillGravityConverted = true;
+        Log.d(TAG, "Pill gravity converted to margins: " + visualLeft + ", " + visualTop);
+    }
+
+    private void savePillPosition(int x, int y) {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        prefs.edit().putInt(KEY_PILL_X, x).putInt(KEY_PILL_Y, y).apply();
+        Log.d(TAG, "Pill position saved: " + x + ", " + y);
+    }
+
+    private void restorePillPosition() {
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        int savedVersion = prefs.getInt(KEY_PILL_VERSION, 0);
+        int x = prefs.getInt(KEY_PILL_X, -1);
+        int y = prefs.getInt(KEY_PILL_Y, -1);
+
+        // Clear corrupted positions from earlier versions
+        if (savedVersion != 2) {
+            x = -1;
+            y = -1;
+            prefs.edit().remove(KEY_PILL_X).remove(KEY_PILL_Y).putInt(KEY_PILL_VERSION, 2).apply();
+            Log.d(TAG, "Pill position cleared (version mismatch)");
+        }
+
+        CoordinatorLayout.LayoutParams params = (CoordinatorLayout.LayoutParams) fabPill.getLayoutParams();
+        final int finalX = x;
+        final int finalY = y;
+        final CoordinatorLayout.LayoutParams finalParams = params;
+
+        fabPill.post(() -> {
+            int pillW = fabPill.getWidth();
+            int pillH = fabPill.getHeight();
+            if (pillW == 0 || pillH == 0) {
+                fabPill.measure(
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+                );
+                pillW = fabPill.getMeasuredWidth();
+                pillH = fabPill.getMeasuredHeight();
+            }
+
+            View parent = (View) fabPill.getParent();
+            int maxStart = Math.max(0, parent.getWidth() - pillW);
+            int maxTop = Math.max(0, parent.getHeight() - pillH);
+
+            if (finalX >= 0 && finalY >= 0) {
+                int clampedX = Math.max(0, Math.min(finalX, maxStart));
+                int clampedY = Math.max(0, Math.min(finalY, maxTop));
+
+                finalParams.gravity = android.view.Gravity.TOP | android.view.Gravity.START;
+                finalParams.setMarginStart(clampedX);
+                finalParams.topMargin = clampedY;
+                fabPill.setLayoutParams(finalParams);
+                pillGravityConverted = true;
+
+                if (clampedX != finalX || clampedY != finalY) {
+                    savePillPosition(clampedX, clampedY);
+                    Log.d(TAG, "Pill restored+clamped: " + clampedX + "," + clampedY + " (was " + finalX + "," + finalY + ")");
+                } else {
+                    Log.d(TAG, "Pill restored: " + clampedX + "," + clampedY);
+                }
+            } else {
+                Log.d(TAG, "Pill using default gravity position");
+            }
+        });
     }
 
     // ==================== PULSE ANIMATION ====================
